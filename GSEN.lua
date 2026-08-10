@@ -899,11 +899,16 @@ local function makeSlider(parent, text, min, max, default, suffix, callback)
 		dragging = true
 		update(UserInputService:GetMouseLocation().X)
 	end))
+	trackConnection(hit.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
 	trackConnection(UserInputService.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 	end))
 	trackConnection(UserInputService.InputChanged:Connect(function(input)
-		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
 			update(input.Position.X)
 		end
 	end))
@@ -913,7 +918,7 @@ local function makeSlider(parent, text, min, max, default, suffix, callback)
 	return {container = container, setValue = setValue}
 end
 
--- 下拉框 (列表挂载到 Content 层, 不受 page.ClipsDescendants 裁切)
+-- 下拉框 (列表 + 透明全屏按钮均挂载到 MainGui, 不受 Content.ClipsDescendants 裁切)
 local function makeDropdown(parent, text, options, default, callback)
 	local container = trackInstance(Instance.new("TextButton"))
 	container.Size = UDim2.new(1, -5, 0, 36)
@@ -950,21 +955,31 @@ local function makeDropdown(parent, text, options, default, callback)
 	valLbl.ZIndex = 11
 	valLbl.Parent = container
 
-	-- 列表挂到 Content 层, 绕过 page 的 ClipsDescendants
+	-- 透明全屏按钮: 列表展开时拦截外部点击 → 关闭列表
+	local catcher = trackInstance(Instance.new("TextButton"))
+	catcher.Size = UDim2.new(1, 0, 1, 0)
+	catcher.BackgroundTransparency = 1
+	catcher.Text = ""
+	catcher.AutoButtonColor = false
+	catcher.Visible = false
+	catcher.ZIndex = 49
+	catcher.Parent = MainGui
+
+	-- 列表挂到 MainGui 层, 不受 Content / page 的 ClipsDescendants 裁切
 	local MAX_LIST_HEIGHT = 140
 	local listHeight = math.min(#options * 28, MAX_LIST_HEIGHT)
 	local list = trackInstance(Instance.new("ScrollingFrame"))
-	list.Size = UDim2.new(0, 0, 0, listHeight)
 	list.BackgroundColor3 = Theme.Element
 	list.BorderSizePixel = 0
 	list.Visible = false
-	list.ZIndex = 20
+	list.ZIndex = 50
 	list.ScrollBarThickness = 4
 	list.ScrollBarImageColor3 = Theme.Stroke
 	list.CanvasSize = UDim2.new(0, 0, 0, #options * 28)
 	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	list.ClipsDescendants = true
-	list.Parent = Content
+	list.Active = true
+	list.Parent = MainGui
 
 	local lc = trackInstance(Instance.new("UICorner"))
 	lc.CornerRadius = UDim.new(0, 6)
@@ -979,7 +994,53 @@ local function makeDropdown(parent, text, options, default, callback)
 	local ll = trackInstance(Instance.new("UIListLayout"))
 	ll.Parent = list
 
-	-- 创建选项按钮的通用函数
+	-- ---- 开关列表 ----
+	local renderConn = nil
+	local closeList, openList
+
+	closeList = function()
+		list.Visible = false
+		catcher.Visible = false
+		container.ZIndex = 1
+		if renderConn then
+			renderConn:Disconnect()
+			renderConn = nil
+		end
+	end
+
+	openList = function()
+		-- 立即设置位置和尺寸, 不等 RenderStepped
+		local cPos  = container.AbsolutePosition
+		local cSize = container.AbsoluteSize
+		list.Position = UDim2.fromOffset(cPos.X + 6, cPos.Y + 38)
+		list.Size = UDim2.new(0, cSize.X - 12, 0, listHeight)
+		list.Visible = true
+		catcher.Visible = true
+		container.ZIndex = 10
+		-- 持续更新位置 (窗口可能被拖动)
+		if renderConn then renderConn:Disconnect() end
+		renderConn = RunService.RenderStepped:Connect(function()
+			local ok = pcall(function()
+				if not list.Visible then return end
+				local cp = container.AbsolutePosition
+				local cs = container.AbsoluteSize
+				list.Position = UDim2.fromOffset(cp.X + 6, cp.Y + 38)
+				list.Size = UDim2.new(0, cs.X - 12, 0, listHeight)
+			end)
+			if not ok and renderConn then
+				renderConn:Disconnect()
+				renderConn = nil
+			end
+		end)
+		trackConnection(renderConn)
+	end
+
+	-- 点击外部关闭 (由透明全屏按钮处理)
+	trackConnection(catcher.MouseButton1Click:Connect(function()
+		closeList()
+	end))
+
+	-- 创建选项按钮
 	local function createOptionButton(opt)
 		local b = trackInstance(Instance.new("TextButton"))
 		b.Size = UDim2.new(1, 0, 0, 28)
@@ -991,7 +1052,7 @@ local function makeDropdown(parent, text, options, default, callback)
 		b.TextXAlignment = Enum.TextXAlignment.Left
 		b.AutoButtonColor = false
 		b.BorderSizePixel = 0
-		b.ZIndex = 21
+		b.ZIndex = 51
 		trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = Theme.Hover end))
 		trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = Theme.Element end))
 		trackConnection(b.MouseButton1Click:Connect(function()
@@ -1000,43 +1061,6 @@ local function makeDropdown(parent, text, options, default, callback)
 			task.spawn(callback, opt)
 		end))
 		b.Parent = list
-	end
-
-	-- ---- 开关列表 ----
-	local renderConn = nil
-
-	local function closeList()
-		list.Visible = false
-		container.ZIndex = 1
-		if renderConn then
-			renderConn:Disconnect()
-			renderConn = nil
-		end
-	end
-
-	local function openList()
-		list.Visible = true
-		container.ZIndex = 10
-		if renderConn then renderConn:Disconnect() end
-		renderConn = RunService.RenderStepped:Connect(function()
-			-- pcall 防止实例被销毁后报错
-			local ok = pcall(function()
-				if not list.Visible then return end
-				local cPos  = container.AbsolutePosition
-				local cSize = container.AbsoluteSize
-				local dPos  = Content.AbsolutePosition
-				list.Position = UDim2.fromOffset(
-					cPos.X - dPos.X + 6,
-					cPos.Y - dPos.Y + 38
-				)
-				list.Size = UDim2.new(0, cSize.X - 12, 0, listHeight)
-			end)
-			if not ok and renderConn then
-				renderConn:Disconnect()
-				renderConn = nil
-			end
-		end)
-		trackConnection(renderConn)
 	end
 
 	for _, opt in ipairs(options) do
@@ -1050,24 +1074,6 @@ local function makeDropdown(parent, text, options, default, callback)
 	-- 页面隐藏时自动关闭
 	trackConnection(parent:GetPropertyChangedSignal("Visible"):Connect(function()
 		if not parent.Visible then closeList() end
-	end))
-
-	-- 点击列表外部关闭
-	trackConnection(UserInputService.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 and list.Visible then
-			local mp   = input.Position
-			local cPos = container.AbsolutePosition
-			local cSz  = container.AbsoluteSize
-			local lPos = list.AbsolutePosition
-			local lSz  = list.AbsoluteSize
-			local inContainer = mp.X >= cPos.X and mp.X <= cPos.X + cSz.X
-				and mp.Y >= cPos.Y and mp.Y <= cPos.Y + cSz.Y
-			local inList = mp.X >= lPos.X and mp.X <= lPos.X + lSz.X
-				and mp.Y >= lPos.Y and mp.Y <= lPos.Y + lSz.Y
-			if not inContainer and not inList then
-				closeList()
-			end
-		end
 	end))
 
 	container.Parent = parent
@@ -1544,21 +1550,16 @@ local IslandTimeLabel
 local ExpandButton
 do
 	CountLabel = trackInstance(Instance.new("TextLabel"))
-	CountLabel.Size = UDim2.fromOffset(180, 28)
-	CountLabel.Position = UDim2.fromOffset(16, 16)
-	CountLabel.BackgroundColor3 = Theme.Window
-	CountLabel.BackgroundTransparency = 0.2
-	CountLabel.TextColor3 = Theme.Text
+	CountLabel.Size = UDim2.fromOffset(220, 24)
+	CountLabel.AnchorPoint = Vector2.new(0.5, 0)
+	CountLabel.Position = UDim2.new(0.5, 0, 0, 40)
+	CountLabel.ZIndex = 0
+	CountLabel.BackgroundTransparency = 1
+	CountLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
 	CountLabel.Font = FontBold
-	CountLabel.TextSize = 13
+	CountLabel.TextSize = 12
 	CountLabel.Text = "Players: 0"
-	CountLabel.Parent = OverlayGui
-	local cc = trackInstance(Instance.new("UICorner"))
-	cc.CornerRadius = UDim.new(0, 6)
-	cc.Parent = CountLabel
-	local s = trackInstance(Instance.new("UIStroke"))
-	s.Color = Theme.Stroke
-	s.Parent = CountLabel
+	CountLabel.Parent = MainGui
 end
 
 --========================================================
