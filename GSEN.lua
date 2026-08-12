@@ -1,3 +1,18 @@
+--[[
+免责声明：
+本代码、示例仅用于计算机技术学习、原理研究，仅供教育参考。
+禁止将本内容用于作弊、扰乱游戏服务、破坏他人游戏体验、绕过平台安全机制等违反Roblox用户协议以及法律法规的行为。
+使用者一切实际操作行为与产生的全部后果，均由使用者本人自行承担，与代码作者无关。
+使用即代表同意本声明。
+]]
+--[[
+DISCLAIMER:
+All code is for educational and research purposes only.
+Do not use for cheating, exploiting or violating platform Terms of Service.
+All risks and consequences shall be borne solely by the end‑user.
+By using this code, you agree to this disclaimer.
+]]
+
 --==================== 服务与变量 ====================
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -27,6 +42,8 @@ local State = {
 	speedEnabled   = false,
 	walkSpeed      = DEFAULT_WALKSPEED,
 	flySpeed       = 60,
+	flingEnabled   = false,
+	flingTarget    = nil,
 	-- 自瞄
 	aimEnabled  = false,
 	aimMode     = "FOV",   -- FOV / 180 / 360
@@ -59,7 +76,8 @@ local function trackInstance(inst)
 end
 
 -- 前向声明: 这些函数会被更早注册的回调引用, 在此先声明局部
-local setFly, setNoclip, ResetAndDestroy
+local setFly, setNoclip, setFling, ResetAndDestroy
+local flingToggleSet = nil  -- 甩飞开关的 set 函数引用, 用于自动关闭时同步 UI
 
 --========================================================
 -- 1. WindUI 风格 GUI 框架
@@ -126,6 +144,20 @@ do
 			dragging = true
 			dragStart = input.Position
 			startPos = Window.Position
+		end
+	end))
+	trackConnection(Window.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+	trackConnection(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			Window.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + delta.X,
+				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+			)
 		end
 	end))
 end
@@ -1686,6 +1718,105 @@ local function updateNoclip()
 	end
 end
 
+-- 静默甩飞 (Walkfling) — 基于 Terukuma 开源方案
+-- 原理: Stepped 保持 Humanoid 正常状态 + 关闭其他玩家碰撞
+--       Heartbeat+RenderStepped 两步: 设极大角速度 + 放大线速度, 下一帧归零
+--       角色全速移动, 碰撞时传递极大动量把别人甩飞
+local flingStepConn = nil
+local flingThread = nil
+
+setFling = function(on)
+	State.flingEnabled = on
+	if on then
+		if flingStepConn then flingStepConn:Disconnect() end
+		if flingThread then task.cancel(flingThread) end
+
+		-- Stepped: 保持 Humanoid 正常状态 + 关闭其他玩家碰撞
+		flingStepConn = RunService.Stepped:Connect(function()
+			if not State.flingEnabled then return end
+			local c = getLocalChar()
+			if not c then return end
+			local hum = c:FindFirstChildOfClass("Humanoid")
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			if hum and hrp then
+				-- 防僵硬: 保持正常站立状态
+				hum.PlatformStand = false
+				hum.Sit = false
+				hum.AutoRotate = true
+				local st = hum:GetState()
+				if st == Enum.HumanoidStateType.Physics or
+				   st == Enum.HumanoidStateType.FallingDown or
+				   st == Enum.HumanoidStateType.Ragdoll then
+					hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				end
+			end
+			-- 关闭其他玩家所有零件的碰撞
+			for _, other in ipairs(Players:GetPlayers()) do
+				if other ~= LocalPlayer and other.Character then
+					for _, part in ipairs(other.Character:GetDescendants()) do
+						if part:IsA("BasePart") then
+							part.CanCollide = false
+						end
+					end
+				end
+			end
+		end)
+
+		-- Heartbeat + RenderStepped 两步循环: 设角速度+放大线速度, 下一帧归零
+		flingThread = task.spawn(function()
+			while State.flingEnabled do
+				RunService.Heartbeat:Wait()
+				local c = getLocalChar()
+				if not c then
+					RunService.RenderStepped:Wait()
+				elseif c:FindFirstChild("HumanoidRootPart") then
+					local hrp = c:FindFirstChild("HumanoidRootPart")
+					local hum = c:FindFirstChildOfClass("Humanoid")
+					-- 保存当前速度
+					local vel = hrp.AssemblyLinearVelocity
+					-- 强制 Running 状态
+					if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+					-- 限制 Y 轴速度 ±40 (防止飞起/坠落)
+					local safeY = vel.Y
+					if safeY > 40 then safeY = 40 end
+					if safeY < -40 then safeY = -40 end
+					-- 设极大角速度 (产生旋转甩飞力)
+					hrp.AssemblyAngularVelocity = Vector3.new(50000, 50000, 50000)
+					-- 放大当前线速度 1.1 倍 (保持移动方向, 轻微加速)
+					hrp.AssemblyLinearVelocity = Vector3.new(vel.X * 1.1, safeY, vel.Z * 1.1)
+					-- 等一帧让物理引擎处理碰撞
+					RunService.RenderStepped:Wait()
+					-- 归零角速度, 恢复原线速度
+					if hrp and hrp.Parent then
+						hrp.AssemblyAngularVelocity = Vector3.zero
+						hrp.AssemblyLinearVelocity = Vector3.new(vel.X, safeY, vel.Z)
+					end
+				else
+					RunService.RenderStepped:Wait()
+				end
+			end
+		end)
+	else
+		-- 关闭: 停止所有循环, 归零速度
+		if flingStepConn then
+			flingStepConn:Disconnect()
+			flingStepConn = nil
+		end
+		if flingThread then
+			task.cancel(flingThread)
+			flingThread = nil
+		end
+		local c = getLocalChar()
+		if c then
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				hrp.AssemblyAngularVelocity = Vector3.zero
+				hrp.AssemblyLinearVelocity = Vector3.zero
+			end
+		end
+	end
+end
+
 --========================================================
 -- 4. 自瞄辅助模块
 --========================================================
@@ -1885,7 +2016,37 @@ do
 	end)
 	makeSectionLabel(page, "穿墙")
 	makeToggle(page, "穿墙 (Noclip)", function(v) setNoclip(v) end)
-	makeSectionLabel(page, "传送")
+end
+
+--========================================================
+-- 战斗页
+--========================================================
+do
+	local page = addTab("战斗", "🎯")
+	makeSectionLabel(page, "自瞄辅助")
+	makeToggle(page, "自瞄开关", function(v) State.aimEnabled = v end)
+	makeDropdown(page, "自瞄模式", {"FOV圈", "180°", "360°"}, "FOV圈", function(opt)
+		local modeMap = {["FOV圈"] = "FOV", ["180°"] = "180", ["360°"] = "360"}
+		State.aimMode = modeMap[opt] or "FOV"
+	end)
+	makeSlider(page, "FOV 圈大小", 30, 400, 120, "px", function(v) State.aimFov = v end)
+	makeSlider(page, "自瞄平滑度", 0.05, 1, 0.30, "", function(v) State.aimSmooth = v end)
+	makeSlider(page, "自瞄距离", 50, 10000, 500, "", function(v) State.aimDistance = v end)
+	makeDropdown(page, "自瞄部位", {"头部 Head", "身体 Body"}, "身体 Body", function(opt)
+		local partMap = {["头部 Head"] = "Head", ["身体 Body"] = "Body"}
+		State.aimPart = partMap[opt] or "Body"
+	end)
+	makeToggle(page, "墙体检测", function(v) State.wallCheck = v end)
+	makeToggle(page, "队伍检测", function(v) State.teamCheck = v end)
+	makeToggle(page, "活体检测", function(v) State.aliveCheck = v end)
+end
+
+--========================================================
+-- 传送页
+--========================================================
+do
+	local page = addTab("传送", "↗")
+	makeSectionLabel(page, "传送 / 甩飞")
 	local teleportTarget = nil
 	local function getPlayerList()
 		local list = {}
@@ -1899,14 +2060,16 @@ do
 		end
 		return list
 	end
-	local tpDropdown = makeDropdown(page, "传送目标", getPlayerList(), "(选择玩家)", function(opt)
+	local tpDropdown = makeDropdown(page, "目标玩家", getPlayerList(), "(选择玩家)", function(opt)
 		teleportTarget = opt
+		State.flingTarget = opt
 	end)
 	makeButton(page, "刷新玩家列表", function()
 		local newList = getPlayerList()
 		tpDropdown.refresh(newList)
 		tpDropdown.valLbl.Text = "(选择玩家)"
 		teleportTarget = nil
+		State.flingTarget = nil
 	end)
 	makeButton(page, "传送到该玩家", function()
 		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
@@ -1936,36 +2099,294 @@ do
 		if not myRoot then return end
 		targetRoot.CFrame = myRoot.CFrame + Vector3.new(0, 3, 0)
 	end)
-end
+	makeButton(page, "甩飞玩家一次", function()
+		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
+		local target = Players:FindFirstChild(teleportTarget)
+		if not target then return end
+		local targetChar = target.Character
+		if not targetChar then return end
+		local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then return end
+		local myChar = LocalPlayer.Character
+		if not myChar then return end
+		local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
 
--- 战斗页
-do
-	local page = addTab("战斗", "🎯")
-	makeSectionLabel(page, "自瞄辅助")
-	makeToggle(page, "自瞄开关", function(v) State.aimEnabled = v end)
-	makeDropdown(page, "自瞄模式", {"FOV圈", "180°", "360°"}, "FOV圈", function(opt)
-		local modeMap = {["FOV圈"] = "FOV", ["180°"] = "180", ["360°"] = "360"}
-		State.aimMode = modeMap[opt] or "FOV"
+		-- 保存原位置
+		local savedCF = myRoot.CFrame
+
+		-- 创建 BodyVelocity 启动阶段
+		local bv = Instance.new("BodyVelocity")
+		bv.Name = "EpixVel"
+		bv.Parent = myRoot
+		bv.Velocity = Vector3.new(900000000, 900000000, 900000000)
+		bv.MaxForce = Vector3.new(1 / 0, 1 / 0, 1 / 0)
+
+		-- 执行甩飞动画: 连续改变位置/旋转, 极高速度+角速度
+		task.spawn(function()
+			local rotationAngle = 0
+			local startTime = tick()
+			local TIMEOUT = 5  -- 超时 5 秒
+
+			while myRoot and myRoot.Parent and targetRoot and targetRoot.Parent do
+				if tick() - startTime > TIMEOUT then break end
+
+				local velMag = targetRoot.Velocity.Magnitude
+				if velMag < 50 then
+					rotationAngle = rotationAngle + 100
+
+					-- 四个位置循环, 改变 CFrame + 极高 Velocity/RotVelocity
+					local positions = {
+						CFrame.new(0, 1.5, 0),
+						CFrame.new(0, -1.5, 0),
+						CFrame.new(2.25, 1.5, -2.25),
+						CFrame.new(-2.25, -1.5, 2.25),
+					}
+
+					for _, offset in ipairs(positions) do
+						if not myRoot or not myRoot.Parent then break end
+						local cf = CFrame.new(targetRoot.Position) * offset * CFrame.Angles(math.rad(rotationAngle), 0, 0)
+						myChar:SetPrimaryPartCFrame(cf)
+						myRoot.Velocity = Vector3.new(90000000, 900000000, 90000000)
+						myRoot.RotVelocity = Vector3.new(900000000, 900000000, 900000000)
+						task.wait()
+					end
+				end
+
+				if targetRoot.Velocity.Magnitude > 500 then
+					break
+				end
+			end
+
+			-- 清理: 移除 BodyVelocity, 恢复位置
+			if bv and bv.Parent then bv:Destroy() end
+			if myRoot and myRoot.Parent then
+				myRoot.Velocity = Vector3.zero
+				myRoot.RotVelocity = Vector3.zero
+				myRoot.CFrame = savedCF
+			end
+		end)
 	end)
-	makeSlider(page, "FOV 圈大小", 30, 400, 120, "px", function(v) State.aimFov = v end)
-	makeSlider(page, "自瞄平滑度", 0.05, 1, 0.30, "", function(v) State.aimSmooth = v end)
-	makeSlider(page, "自瞄距离", 50, 10000, 500, "", function(v) State.aimDistance = v end)
-	makeDropdown(page, "自瞄部位", {"头部 Head", "身体 Body"}, "身体 Body", function(opt)
-		local partMap = {["头部 Head"] = "Head", ["身体 Body"] = "Body"}
-		State.aimPart = partMap[opt] or "Body"
-	end)
-	makeToggle(page, "墙体检测", function(v) State.wallCheck = v end)
-	makeToggle(page, "队伍检测", function(v) State.teamCheck = v end)
-	makeToggle(page, "活体检测", function(v) State.aliveCheck = v end)
+	local flingToggle = makeToggle(page, "静默甩飞", function(v) setFling(v) end)
+	flingToggleSet = flingToggle.set
 end
 
 -- 设置页
 do
 	local page = addTab("设置", "⚙")
-	makeSectionLabel(page, "菜单")
-	makeButton(page, "全部重置并关闭", function()
-		ResetAndDestroy()
+	makeButton(page, "关于", function()
+		-- 如果已存在则先销毁
+		if MainGui:FindFirstChild("AboutPanel") then
+			MainGui.AboutPanel:Destroy()
+		end
+
+		local aboutPanel = trackInstance(Instance.new("Frame"))
+		aboutPanel.Name = "AboutPanel"
+		aboutPanel.Size = UDim2.fromOffset(200, 180)
+		aboutPanel.Position = UDim2.new(0.5, -100, 0.5, -90)
+		aboutPanel.BackgroundColor3 = Theme.Window
+		aboutPanel.BorderSizePixel = 0
+		aboutPanel.Active = true
+		aboutPanel.ZIndex = 100
+		local apC = trackInstance(Instance.new("UICorner"))
+		apC.CornerRadius = UDim.new(0, 10)
+		apC.Parent = aboutPanel
+		local apS = trackInstance(Instance.new("UIStroke"))
+		apS.Color = Theme.Accent
+		apS.Thickness = 1
+		apS.Parent = aboutPanel
+		aboutPanel.Parent = MainGui
+
+		-- 标题栏 (拖拽区域)
+		local aboutTitle = trackInstance(Instance.new("Frame"))
+		aboutTitle.Size = UDim2.new(1, 0, 0, 30)
+		aboutTitle.BackgroundColor3 = Theme.TabBar
+		aboutTitle.BorderSizePixel = 0
+		aboutTitle.ZIndex = 101
+		local atC = trackInstance(Instance.new("UICorner"))
+		atC.CornerRadius = UDim.new(0, 10)
+		atC.Parent = aboutTitle
+		local atMask = trackInstance(Instance.new("Frame"))
+		atMask.Size = UDim2.new(1, 0, 0, 15)
+		atMask.Position = UDim2.fromOffset(0, 15)
+		atMask.BackgroundColor3 = Theme.TabBar
+		atMask.BorderSizePixel = 0
+		atMask.ZIndex = 101
+		atMask.Parent = aboutTitle
+		local aboutTitleText = trackInstance(Instance.new("TextLabel"))
+		aboutTitleText.Size = UDim2.new(1, -30, 1, 0)
+		aboutTitleText.Position = UDim2.fromOffset(10, 0)
+		aboutTitleText.BackgroundTransparency = 1
+		aboutTitleText.Text = "关于"
+		aboutTitleText.TextColor3 = Theme.Text
+		aboutTitleText.Font = FontBold
+		aboutTitleText.TextSize = 13
+		aboutTitleText.TextXAlignment = Enum.TextXAlignment.Left
+		aboutTitleText.ZIndex = 102
+		aboutTitleText.Parent = aboutTitle
+		aboutTitle.Parent = aboutPanel
+
+		-- 关闭按钮
+		local aboutCloseBtn = trackInstance(Instance.new("TextButton"))
+		aboutCloseBtn.Size = UDim2.fromOffset(20, 20)
+		aboutCloseBtn.Position = UDim2.new(1, -25, 0, 5)
+		aboutCloseBtn.BackgroundColor3 = Theme.Element
+		aboutCloseBtn.Text = "X"
+		aboutCloseBtn.TextColor3 = Theme.Red
+		aboutCloseBtn.Font = FontBold
+		aboutCloseBtn.TextSize = 11
+		aboutCloseBtn.BorderSizePixel = 0
+		aboutCloseBtn.ZIndex = 102
+		aboutCloseBtn.AutoButtonColor = false
+		local acC = trackInstance(Instance.new("UICorner"))
+		acC.CornerRadius = UDim.new(0, 5)
+		acC.Parent = aboutCloseBtn
+		trackConnection(aboutCloseBtn.MouseButton1Click:Connect(function()
+			aboutPanel:Destroy()
+		end))
+		trackConnection(aboutCloseBtn.MouseEnter:Connect(function() aboutCloseBtn.BackgroundColor3 = Theme.Hover end))
+		trackConnection(aboutCloseBtn.MouseLeave:Connect(function() aboutCloseBtn.BackgroundColor3 = Theme.Element end))
+		aboutCloseBtn.Parent = aboutTitle
+
+		-- 内容滚动区: 保持外层悬浮窗尺寸不变, 内容超出时在内部滚动
+		local aboutScroll = trackInstance(Instance.new("ScrollingFrame"))
+		aboutScroll.Name = "AboutScroll"
+		aboutScroll.Size = UDim2.new(1, -12, 1, -38)
+		aboutScroll.Position = UDim2.fromOffset(6, 32)
+		aboutScroll.BackgroundTransparency = 1
+		aboutScroll.BorderSizePixel = 0
+		aboutScroll.ScrollBarThickness = 4
+		aboutScroll.ScrollBarImageColor3 = Theme.Stroke
+		aboutScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+		aboutScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		aboutScroll.Parent = aboutPanel
+
+		local aboutContent = trackInstance(Instance.new("Frame"))
+		aboutContent.Name = "AboutContent"
+		aboutContent.Size = UDim2.new(1, -6, 0, 250)
+		aboutContent.BackgroundTransparency = 1
+		aboutContent.BorderSizePixel = 0
+		aboutContent.Parent = aboutScroll
+
+		local aboutContentLayout = trackInstance(Instance.new("UIListLayout"))
+		aboutContentLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+		aboutContentLayout.SortOrder = Enum.SortOrder.LayoutOrder
+		aboutContentLayout.Padding = UDim.new(0, 8)
+		aboutContentLayout.Parent = aboutContent
+
+		trackConnection(aboutContentLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+			aboutContent.Size = UDim2.new(1, -6, 0, aboutContentLayout.AbsoluteContentSize.Y + 6)
+			aboutScroll.CanvasSize = UDim2.new(0, 0, 0, aboutContentLayout.AbsoluteContentSize.Y + 6)
+		end))
+
+		-- 头像
+		local avatarFrame = trackInstance(Instance.new("Frame"))
+		avatarFrame.Size = UDim2.fromOffset(64, 64)
+		avatarFrame.Position = UDim2.new(0.5, -32, 0, 0)
+		avatarFrame.BackgroundColor3 = Theme.Element
+		avatarFrame.BorderSizePixel = 0
+		avatarFrame.ZIndex = 101
+		avatarFrame.LayoutOrder = 1
+		local avC = trackInstance(Instance.new("UICorner"))
+		avC.CornerRadius = UDim.new(0, 32)
+		avC.Parent = avatarFrame
+		local avS = trackInstance(Instance.new("UIStroke"))
+		avS.Color = Theme.Accent
+		avS.Thickness = 2
+		avS.Parent = avatarFrame
+		avatarFrame.Parent = aboutContent
+
+		-- 用 ImageLabel 加载头像
+		local avatarImg = trackInstance(Instance.new("ImageLabel"))
+		avatarImg.Size = UDim2.fromScale(1, 1)
+		avatarImg.BackgroundTransparency = 1
+		avatarImg.ZIndex = 102
+		-- 获取用户头像 (headshot)
+		local ok, thumb = pcall(function()
+			return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
+		end)
+		if ok and thumb then
+			avatarImg.Image = thumb
+		end
+		avatarImg.Parent = avatarFrame
+
+		-- 用户名
+		local usernameLabel = trackInstance(Instance.new("TextLabel"))
+		usernameLabel.Size = UDim2.new(1, -20, 0, 20)
+		usernameLabel.Position = UDim2.fromOffset(10, 0)
+		usernameLabel.BackgroundTransparency = 1
+		usernameLabel.Text = "@" .. LocalPlayer.Name
+		usernameLabel.TextColor3 = Theme.Accent
+		usernameLabel.Font = FontBold
+		usernameLabel.TextSize = 13
+		usernameLabel.ZIndex = 101
+		usernameLabel.LayoutOrder = 2
+		usernameLabel.Parent = aboutContent
+
+		-- 昵称 (DisplayName)
+		local nickLabel = trackInstance(Instance.new("TextLabel"))
+		nickLabel.Size = UDim2.new(1, -20, 0, 20)
+		nickLabel.Position = UDim2.fromOffset(10, 0)
+		nickLabel.BackgroundTransparency = 1
+		nickLabel.Text = LocalPlayer.DisplayName
+		nickLabel.TextColor3 = Theme.Text
+		nickLabel.Font = FontMain
+		nickLabel.TextSize = 14
+		nickLabel.ZIndex = 101
+		nickLabel.LayoutOrder = 3
+		nickLabel.Parent = aboutContent
+
+		local authorLabel = trackInstance(Instance.new("TextLabel"))
+		authorLabel.Size = UDim2.new(1, -20, 0, 20)
+		authorLabel.Position = UDim2.fromOffset(10, 0)
+		authorLabel.BackgroundTransparency = 1
+		authorLabel.Text = "作者：円侁"
+		authorLabel.TextColor3 = Theme.Text
+		authorLabel.Font = FontBold
+		authorLabel.TextSize = 13
+		authorLabel.TextWrapped = true
+		authorLabel.ZIndex = 101
+		authorLabel.LayoutOrder = 4
+		authorLabel.Parent = aboutContent
+
+		local supportLabel = trackInstance(Instance.new("TextLabel"))
+		supportLabel.Size = UDim2.new(1, -20, 0, 42)
+		supportLabel.Position = UDim2.fromOffset(10, 0)
+		supportLabel.BackgroundTransparency = 1
+		supportLabel.Text = "技术支持：TRAE、Chat GPT、豆包"
+		supportLabel.TextColor3 = Theme.SubText
+		supportLabel.Font = FontMain
+		supportLabel.TextSize = 13
+		supportLabel.TextWrapped = true
+		supportLabel.ZIndex = 101
+		supportLabel.LayoutOrder = 5
+		supportLabel.Parent = aboutContent
+
+		-- 拖拽 (仅标题栏可拖动)
+		local dragging2, dragStart2, startPos2
+		trackConnection(aboutTitle.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging2 = true
+				dragStart2 = input.Position
+				startPos2 = aboutPanel.Position
+			end
+		end))
+		trackConnection(aboutTitle.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				dragging2 = false
+			end
+		end))
+		trackConnection(UserInputService.InputChanged:Connect(function(input)
+			if dragging2 and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart2
+				aboutPanel.Position = UDim2.new(
+					startPos2.X.Scale, startPos2.X.Offset + delta.X,
+					startPos2.Y.Scale, startPos2.Y.Offset + delta.Y
+				)
+			end
+		end))
 	end)
+
 	makeSectionLabel(page, "说明")
 	local info = trackInstance(Instance.new("TextLabel"))
 	info.Size = UDim2.new(1, 0, 0, 80)
@@ -2280,6 +2701,94 @@ end
 trackConnection(MinimizeBtn.MouseButton1Click:Connect(function() setMinimized(true) end))
 trackConnection(ExpandButton.MouseButton1Click:Connect(function() setMinimized(false) end))
 
+-- 关闭确认窗口: 点击右上角 X 后先确认, 确定后再执行原来的关闭清理流程
+local function showCloseConfirm()
+	-- 防止重复弹出多个确认窗口
+	local oldConfirm = MainGui:FindFirstChild("CloseConfirmPanel")
+	if oldConfirm then
+		oldConfirm:Destroy()
+	end
+
+	local confirmPanel = trackInstance(Instance.new("Frame"))
+	confirmPanel.Name = "CloseConfirmPanel"
+	confirmPanel.Size = UDim2.fromOffset(260, 140)
+	confirmPanel.Position = UDim2.new(0.5, -130, 0.5, -70)
+	confirmPanel.BackgroundColor3 = Theme.Window
+	confirmPanel.BorderSizePixel = 0
+	confirmPanel.Active = true
+	confirmPanel.ZIndex = 120
+	local cpCorner = trackInstance(Instance.new("UICorner"))
+	cpCorner.CornerRadius = UDim.new(0, 10)
+	cpCorner.Parent = confirmPanel
+	local cpStroke = trackInstance(Instance.new("UIStroke"))
+	cpStroke.Color = Theme.Accent
+	cpStroke.Thickness = 1
+	cpStroke.Transparency = 0.15
+	cpStroke.Parent = confirmPanel
+	confirmPanel.Parent = MainGui
+
+	local title = trackInstance(Instance.new("TextLabel"))
+	title.Size = UDim2.new(1, -24, 0, 34)
+	title.Position = UDim2.fromOffset(12, 8)
+	title.BackgroundTransparency = 1
+	title.Text = "确认关闭"
+	title.TextColor3 = Theme.Text
+	title.Font = FontBold
+	title.TextSize = 15
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.ZIndex = 121
+	title.Parent = confirmPanel
+
+	local message = trackInstance(Instance.new("TextLabel"))
+	message.Size = UDim2.new(1, -24, 0, 44)
+	message.Position = UDim2.fromOffset(12, 42)
+	message.BackgroundTransparency = 1
+	message.Text = "确定要关闭 GSEN 辅助吗？\n确定后会重置全部功能并销毁窗口。"
+	message.TextColor3 = Theme.SubText
+	message.Font = FontMain
+	message.TextSize = 12
+	message.TextWrapped = true
+	message.TextXAlignment = Enum.TextXAlignment.Left
+	message.TextYAlignment = Enum.TextYAlignment.Top
+	message.ZIndex = 121
+	message.Parent = confirmPanel
+
+	local function makeConfirmButton(text, x, color, hoverColor, callback)
+		local btn = trackInstance(Instance.new("TextButton"))
+		btn.Size = UDim2.fromOffset(108, 30)
+		btn.Position = UDim2.fromOffset(x, 98)
+		btn.BackgroundColor3 = color
+		btn.BorderSizePixel = 0
+		btn.Text = text
+		btn.TextColor3 = Theme.Text
+		btn.Font = FontBold
+		btn.TextSize = 13
+		btn.AutoButtonColor = false
+		btn.ZIndex = 121
+		local bc = trackInstance(Instance.new("UICorner"))
+		bc.CornerRadius = UDim.new(0, 6)
+		bc.Parent = btn
+		trackConnection(btn.MouseEnter:Connect(function() btn.BackgroundColor3 = hoverColor end))
+		trackConnection(btn.MouseLeave:Connect(function() btn.BackgroundColor3 = color end))
+		trackConnection(btn.MouseButton1Click:Connect(callback))
+		btn.Parent = confirmPanel
+		return btn
+	end
+
+	makeConfirmButton("取消", 12, Theme.Element, Theme.Hover, function()
+		if confirmPanel and confirmPanel.Parent then
+			confirmPanel:Destroy()
+		end
+	end)
+
+	makeConfirmButton("确定关闭", 140, Theme.AccentDark, Theme.Accent, function()
+		if confirmPanel and confirmPanel.Parent then
+			confirmPanel:Destroy()
+		end
+		ResetAndDestroy()
+	end)
+end
+
 -- 关闭 = 重置全部功能并销毁
 ResetAndDestroy = function()
 	-- 关闭所有开关
@@ -2294,6 +2803,8 @@ ResetAndDestroy = function()
 	if State.flyEnabled then setFly(false) end
 	-- 关闭穿墙
 	if State.noclipEnabled then setNoclip(false) end
+	-- 关闭甩飞
+	if State.flingEnabled then setFling(false) end
 	-- 关闭移速开关 (恢复默认移速, 但保留已调节的参数值)
 	State.speedEnabled = false
 	applyWalkSpeed()
@@ -2316,7 +2827,7 @@ ResetAndDestroy = function()
 	end
 	Runtime.instances = {}
 end
-trackConnection(CloseBtn.MouseButton1Click:Connect(function() ResetAndDestroy() end))
+trackConnection(CloseBtn.MouseButton1Click:Connect(function() showCloseConfirm() end))
 
 --========================================================
 -- 8. 菜单显隐切换键 (右 Ctrl)
