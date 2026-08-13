@@ -44,6 +44,19 @@ local State = {
 	flySpeed       = 60,
 	flingEnabled   = false,
 	flingTarget    = nil,
+	-- 旋转
+	spinEnabled    = false,
+	spinSpeed      = 5,
+	-- 环绕
+	orbitEnabled   = false,
+	orbitTarget    = nil,
+	orbitRadius    = 8,
+	orbitSpeed     = 5,
+	-- 循环传送
+	loopTpEnabled    = false,
+	loopTpTarget     = nil,
+	loopTpAllEnabled = false,
+	loopTpInterval   = 0.01,
 	-- 自瞄
 	aimEnabled  = false,
 	aimMode     = "FOV",   -- FOV / 180 / 360
@@ -76,8 +89,15 @@ local function trackInstance(inst)
 end
 
 -- 前向声明: 这些函数会被更早注册的回调引用, 在此先声明局部
-local setFly, setNoclip, setFling, ResetAndDestroy
+local setFly, setNoclip, setFling, setOrbit, setSpin, setLoopTp, setLoopTpAll, ResetAndDestroy
 local flingToggleSet = nil  -- 甩飞开关的 set 函数引用, 用于自动关闭时同步 UI
+local orbitToggleSet = nil  -- 环绕开关的 set 函数引用, 用于自动关闭时同步 UI
+local orbitAngle = 0        -- 环绕角度累加器
+local savedCamOffset = nil  -- 环绕时摄像机相对目标的位置偏移
+local spinAngle = 0         -- 自旋角度累加器
+local spinYVelocity = 0     -- 自旋时手动管理的垂直速度 (跳跃/重力)
+local GROUND_OFFSET = 3.2   -- HRootPart 中心到脚底的近似距离
+local JUMP_POWER = 50       -- 跳跃初速度
 
 --========================================================
 -- 1. WindUI 风格 GUI 框架
@@ -1614,6 +1634,8 @@ trackConnection(LocalPlayer.CharacterAdded:Connect(function()
 	applyWalkSpeed()
 	if State.flyEnabled then setFly(true) end
 	if State.noclipEnabled then setNoclip(true) end
+	if State.orbitEnabled then setOrbit(true) end
+	if State.spinEnabled then setSpin(true) end
 end))
 
 -- 穿墙
@@ -1818,6 +1840,264 @@ setFling = function(on)
 end
 
 --========================================================
+-- 3.5 环绕模块
+--========================================================
+setOrbit = function(on)
+	State.orbitEnabled = on
+	local cam = workspace.CurrentCamera
+	local c = getLocalChar()
+	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	if on then
+		-- 开启: PlatformStand 防止重力/移动干扰环绕
+		if hum then hum.PlatformStand = true end
+		-- 切换摄像机为脚本控制, 避免跟随角色自转
+		if cam then
+			cam.CameraType = Enum.CameraType.Scriptable
+		end
+		savedCamOffset = nil  -- 等待 updateOrbit 首帧记录
+	else
+		-- 关闭: 恢复正常状态, 归零速度防止惯性滑动
+		if hum then hum.PlatformStand = false end
+		if c then
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+		-- 恢复摄像机为默认跟随模式
+		if cam then
+			cam.CameraType = Enum.CameraType.Custom
+		end
+		savedCamOffset = nil
+	end
+end
+
+-- 环绕每帧更新: 绕目标玩家做水平圆周运动, 角色面向目标, 摄像机固定看向目标
+local function updateOrbit(dt)
+	if not State.orbitEnabled then return end
+	local targetName = State.orbitTarget
+	if not targetName or targetName == "(无其他玩家)" or targetName == "(选择玩家)" then return end
+	local target = Players:FindFirstChild(targetName)
+	if not target or not target.Character then return end
+	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+	if not targetRoot then return end
+
+	local c = getLocalChar()
+	if not c then return end
+	local myRoot = c:FindFirstChild("HumanoidRootPart")
+	local myHum = c:FindFirstChildOfClass("Humanoid")
+	if not myRoot then return end
+
+	-- 角度累加 (速度单位: 弧度/秒)
+	orbitAngle = orbitAngle + State.orbitSpeed * dt
+	if orbitAngle > math.pi * 2 then
+		orbitAngle = orbitAngle - math.pi * 2
+	end
+
+	-- 计算环绕位置 (水平圆周, Y 轴与目标齐平)
+	local radius = State.orbitRadius
+	local targetPos = targetRoot.Position
+	local offsetX = math.cos(orbitAngle) * radius
+	local offsetZ = math.sin(orbitAngle) * radius
+	local orbitPos = targetPos + Vector3.new(offsetX, 0, offsetZ)
+
+	-- 角色位置在轨道上, 并面向目标
+	myRoot.CFrame = CFrame.lookAt(orbitPos, targetPos)
+
+	-- 摄像机固定: 首帧记录相对目标的位置偏移, 之后保持位置并始终看向目标
+	local cam = workspace.CurrentCamera
+	if cam then
+		if not savedCamOffset then
+			savedCamOffset = cam.CFrame.Position - targetPos
+		end
+		local camPos = targetPos + savedCamOffset
+		cam.CFrame = CFrame.lookAt(camPos, targetPos)
+	end
+
+	-- 持续保持 PlatformStand
+	if myHum then
+		myHum.PlatformStand = true
+	end
+end
+
+--========================================================
+-- 3.6 自旋模块
+--========================================================
+-- 锚定/取消锚定角色所有部件
+local function setCharacterAnchored(char, anchored)
+	for _, part in ipairs(char:GetChildren()) do
+		if part:IsA("BasePart") then
+			part.Anchored = anchored
+		end
+	end
+end
+
+setSpin = function(on)
+	State.spinEnabled = on
+	local c = getLocalChar()
+	local hum = c and c:FindFirstChildOfClass("Humanoid")
+	if on then
+		-- 开启: PlatformStand + 锚定全身, 防止物理引擎驱动四肢产生虚化
+		if hum then hum.PlatformStand = true end
+		if c then setCharacterAnchored(c, true) end
+		spinYVelocity = 0
+	else
+		-- 关闭: 取消锚定, 恢复正常状态
+		if c then setCharacterAnchored(c, false) end
+		if hum then hum.PlatformStand = false end
+		if c then
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			if hrp then
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.AssemblyAngularVelocity = Vector3.zero
+			end
+		end
+	end
+end
+
+-- 自旋每帧更新: 锚定状态下手动处理移动 + 跳跃 + 旋转, 摄像机正常跟随
+local function updateSpin(dt)
+	if not State.spinEnabled then return end
+	local c = getLocalChar()
+	if not c then return end
+	local myRoot = c:FindFirstChild("HumanoidRootPart")
+	local myHum = c:FindFirstChildOfClass("Humanoid")
+	if not myRoot then return end
+
+	-- 角度累加 (速度单位: 弧度/秒)
+	spinAngle = spinAngle + State.spinSpeed * dt
+	if spinAngle > math.pi * 2 then
+		spinAngle = spinAngle - math.pi * 2
+	end
+
+	-- 计算当前位置
+	local currentPos = myRoot.Position
+
+	-- 用 Humanoid.MoveDirection 获取移动方向 (键盘 WASD 和手机摇杆都会自动更新此值)
+	if myHum then
+		local moveDir = myHum.MoveDirection
+		if moveDir.Magnitude > 0 then
+			local speed = State.speedEnabled and State.walkSpeed or DEFAULT_WALKSPEED
+			-- 只在水平面移动
+			currentPos = currentPos + Vector3.new(moveDir.X, 0, moveDir.Z) * speed * dt
+		end
+	end
+
+	-- 射线检测参数 (排除自身角色)
+	local rayParams = RaycastParams.new()
+	rayParams.FilterDescendantsInstances = {c}
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+	-- 检测是否在地面
+	local groundRay = workspace:Raycast(currentPos, Vector3.new(0, -GROUND_OFFSET - 0.5, 0), rayParams)
+	local onGround = groundRay ~= nil
+
+	-- 跳跃检测: Humanoid.Jump (手机跳跃按钮) 或 空格键 (PC)
+	local wantJump = (myHum and myHum.Jump) or UserInputService:IsKeyDown(Enum.KeyCode.Space)
+	if wantJump and onGround and spinYVelocity <= 0 then
+		spinYVelocity = JUMP_POWER
+	end
+
+	-- 重力
+	spinYVelocity = spinYVelocity - workspace.Gravity * dt
+
+	-- 应用垂直位移
+	currentPos = currentPos + Vector3.new(0, spinYVelocity * dt, 0)
+
+	-- 地面碰撞: 下落时如果穿过地面, 回到地面高度
+	if spinYVelocity <= 0 then
+		local landRay = workspace:Raycast(currentPos, Vector3.new(0, -GROUND_OFFSET - 1, 0), rayParams)
+		if landRay then
+			currentPos = Vector3.new(currentPos.X, landRay.Position.Y + GROUND_OFFSET, currentPos.Z)
+			spinYVelocity = 0
+		end
+	end
+
+	-- 用 PivotTo 刚性旋转 + 位移整个角色模型, 所有部件一起转, 不会虚化
+	c:PivotTo(CFrame.new(currentPos) * CFrame.Angles(0, spinAngle, 0))
+
+	-- 持续保持 PlatformStand
+	if myHum then
+		myHum.PlatformStand = true
+	end
+end
+
+--========================================================
+-- 3.7 循环传送模块
+--========================================================
+-- 传送自己到目标玩家身边
+local function teleportToPlayer(targetName)
+	local target = Players:FindFirstChild(targetName)
+	if not target or not target.Character then return end
+	local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+	if not targetRoot then return end
+	local myChar = LocalPlayer.Character
+	if not myChar then return end
+	local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+	if not myRoot then return end
+	myRoot.CFrame = targetRoot.CFrame + Vector3.new(0, 4, 0)
+end
+
+-- 循环传送: 指定玩家
+local loopTpThread = nil
+setLoopTp = function(on)
+	State.loopTpEnabled = on
+	if on then
+		loopTpThread = task.spawn(function()
+			while State.loopTpEnabled do
+				local target = State.loopTpTarget
+				if target and target ~= "(无其他玩家)" and target ~= "(选择玩家)" then
+					teleportToPlayer(target)
+				end
+				task.wait(State.loopTpInterval)
+			end
+		end)
+	else
+		State.loopTpEnabled = false
+	end
+end
+
+-- 循环传送: 所有玩家 (持续传送到当前玩家, 直到其消失再切换下一个)
+local loopTpAllThread = nil
+local loopTpAllIndex = 1
+setLoopTpAll = function(on)
+	State.loopTpAllEnabled = on
+	if on then
+		loopTpAllThread = task.spawn(function()
+			while State.loopTpAllEnabled do
+				local list = {}
+				for _, p in ipairs(Players:GetPlayers()) do
+					if p ~= LocalPlayer then
+						table.insert(list, p.Name)
+					end
+				end
+				if #list > 0 then
+					if loopTpAllIndex > #list then loopTpAllIndex = 1 end
+					local currentTarget = list[loopTpAllIndex]
+					-- 持续循环传送到当前玩家, 直到其消失 (离开/角色销毁/死亡)
+					while State.loopTpAllEnabled do
+						local p = Players:FindFirstChild(currentTarget)
+						if not p then break end
+						local char = p.Character
+						if not char or not char:FindFirstChild("HumanoidRootPart") then break end
+						local hum = char:FindFirstChildOfClass("Humanoid")
+						if hum and hum.Health <= 0 then break end
+						teleportToPlayer(currentTarget)
+						task.wait(State.loopTpInterval)
+					end
+					loopTpAllIndex = loopTpAllIndex + 1
+				else
+					task.wait(0.5)
+				end
+			end
+		end)
+	else
+		State.loopTpAllEnabled = false
+	end
+end
+
+--========================================================
 -- 4. 自瞄辅助模块
 --========================================================
 -- FOV 圈
@@ -1960,6 +2240,10 @@ RunService:BindToRenderStep(RENDER_NAME, Enum.RenderPriority.Camera.Value + 1, f
 	updateFly(dt)
 	-- 穿墙保持
 	updateNoclip()
+	-- 环绕
+	updateOrbit(dt)
+	-- 自旋
+	updateSpin(dt)
 	-- 自瞄
 	updateAim()
 	-- FOV 圈
@@ -2016,6 +2300,9 @@ do
 	end)
 	makeSectionLabel(page, "穿墙")
 	makeToggle(page, "穿墙 (Noclip)", function(v) setNoclip(v) end)
+	makeSectionLabel(page, "自旋")
+	makeToggle(page, "自旋开关", function(v) setSpin(v) end)
+	makeSlider(page, "自旋速度", 0.5, 100, 5, "", function(v) State.spinSpeed = v end)
 end
 
 --========================================================
@@ -2063,6 +2350,8 @@ do
 	local tpDropdown = makeDropdown(page, "目标玩家", getPlayerList(), "(选择玩家)", function(opt)
 		teleportTarget = opt
 		State.flingTarget = opt
+		State.orbitTarget = opt
+		State.loopTpTarget = opt
 	end)
 	makeButton(page, "刷新玩家列表", function()
 		local newList = getPlayerList()
@@ -2070,6 +2359,8 @@ do
 		tpDropdown.valLbl.Text = "(选择玩家)"
 		teleportTarget = nil
 		State.flingTarget = nil
+		State.orbitTarget = nil
+		State.loopTpTarget = nil
 	end)
 	makeButton(page, "传送到该玩家", function()
 		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
@@ -2169,6 +2460,16 @@ do
 	end)
 	local flingToggle = makeToggle(page, "静默甩飞", function(v) setFling(v) end)
 	flingToggleSet = flingToggle.set
+
+	makeSectionLabel(page, "环绕")
+	local orbitToggle = makeToggle(page, "环绕目标玩家", function(v) setOrbit(v) end)
+	orbitToggleSet = orbitToggle.set
+	makeSlider(page, "环绕半径", 1, 50, 8, " studs", function(v) State.orbitRadius = v end)
+	makeSlider(page, "环绕速度", 0.5, 100, 5, "", function(v) State.orbitSpeed = v end)
+
+	makeSectionLabel(page, "循环传送")
+	local loopTpToggle = makeToggle(page, "循环传送指定玩家", function(v) setLoopTp(v) end)
+	local loopTpAllToggle = makeToggle(page, "循环传送所有玩家", function(v) setLoopTpAll(v) end)
 end
 
 -- 设置页
@@ -2805,6 +3106,13 @@ ResetAndDestroy = function()
 	if State.noclipEnabled then setNoclip(false) end
 	-- 关闭甩飞
 	if State.flingEnabled then setFling(false) end
+	-- 关闭环绕
+	if State.orbitEnabled then setOrbit(false) end
+	-- 关闭自旋
+	if State.spinEnabled then setSpin(false) end
+	-- 关闭循环传送
+	if State.loopTpEnabled then setLoopTp(false) end
+	if State.loopTpAllEnabled then setLoopTpAll(false) end
 	-- 关闭移速开关 (恢复默认移速, 但保留已调节的参数值)
 	State.speedEnabled = false
 	applyWalkSpeed()
