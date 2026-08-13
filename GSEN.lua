@@ -47,6 +47,10 @@ local State = {
 	-- 旋转
 	spinEnabled    = false,
 	spinSpeed      = 5,
+	-- 无限跳
+	infJumpEnabled = false,
+	-- 秒交互
+	promptInstantEnabled = false,
 	-- 环绕
 	orbitEnabled   = false,
 	orbitTarget    = nil,
@@ -89,7 +93,7 @@ local function trackInstance(inst)
 end
 
 -- 前向声明: 这些函数会被更早注册的回调引用, 在此先声明局部
-local setFly, setNoclip, setFling, setOrbit, setSpin, setLoopTp, setLoopTpAll, ResetAndDestroy
+local setFly, setNoclip, setFling, setOrbit, setSpin, setLoopTp, setLoopTpAll, setInstantPrompt, ResetAndDestroy
 local flingToggleSet = nil  -- 甩飞开关的 set 函数引用, 用于自动关闭时同步 UI
 local orbitToggleSet = nil  -- 环绕开关的 set 函数引用, 用于自动关闭时同步 UI
 local orbitAngle = 0        -- 环绕角度累加器
@@ -1638,6 +1642,71 @@ trackConnection(LocalPlayer.CharacterAdded:Connect(function()
 	if State.spinEnabled then setSpin(true) end
 end))
 
+-- 无限跳: 监听跳跃请求, 无论是否在地面都允许跳跃
+local infJumpConn = nil
+local function setupInfJump()
+	if infJumpConn then infJumpConn:Disconnect(); infJumpConn = nil end
+	local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	infJumpConn = UserInputService.JumpRequest:Connect(function()
+		if State.infJumpEnabled then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+	trackConnection(infJumpConn)
+end
+
+trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+	task.wait(0.5)
+	setupInfJump()
+end))
+
+-- 初始化无限跳 (如果角色已存在)
+task.spawn(function()
+	task.wait(0.5)
+	setupInfJump()
+end)
+
+-- 秒交互: 将所有 ProximityPrompt 的 HoldDuration 改为 0
+local promptConn = nil
+local originalPrompts = {}  -- 记录原始 HoldDuration
+setInstantPrompt = function(on)
+	State.promptInstantEnabled = on
+	if on then
+		-- 处理已存在的 ProximityPrompt
+		for _, desc in ipairs(workspace:GetDescendants()) do
+			if desc:IsA("ProximityPrompt") then
+				if originalPrompts[desc] == nil then
+					originalPrompts[desc] = desc.HoldDuration
+				end
+				desc.HoldDuration = 0
+			end
+		end
+		-- 监听新添加的 ProximityPrompt
+		promptConn = workspace.DescendantAdded:Connect(function(desc)
+			if desc:IsA("ProximityPrompt") then
+				if originalPrompts[desc] == nil then
+					originalPrompts[desc] = desc.HoldDuration
+				end
+				desc.HoldDuration = 0
+			end
+		end)
+		trackConnection(promptConn)
+	else
+		if promptConn then
+			promptConn:Disconnect()
+			promptConn = nil
+		end
+		-- 恢复原始 HoldDuration
+		for prompt, orig in pairs(originalPrompts) do
+			if prompt.Parent then
+				prompt.HoldDuration = orig
+			end
+		end
+		originalPrompts = {}
+	end
+end
+
 -- 穿墙
 setNoclip = function(on)
 	State.noclipEnabled = on
@@ -2058,7 +2127,7 @@ setLoopTp = function(on)
 	end
 end
 
--- 循环传送: 所有玩家 (持续传送到当前玩家, 直到其消失再切换下一个)
+-- 循环传送: 敌对玩家 (持续传送到当前敌对玩家, 直到其消失再切换下一个)
 local loopTpAllThread = nil
 local loopTpAllIndex = 1
 setLoopTpAll = function(on)
@@ -2066,19 +2135,22 @@ setLoopTpAll = function(on)
 	if on then
 		loopTpAllThread = task.spawn(function()
 			while State.loopTpAllEnabled do
+				-- 获取与自己不同队伍的玩家列表
 				local list = {}
+				local myTeam = LocalPlayer.Team
 				for _, p in ipairs(Players:GetPlayers()) do
-					if p ~= LocalPlayer then
+					if p ~= LocalPlayer and p.Team ~= myTeam then
 						table.insert(list, p.Name)
 					end
 				end
 				if #list > 0 then
 					if loopTpAllIndex > #list then loopTpAllIndex = 1 end
 					local currentTarget = list[loopTpAllIndex]
-					-- 持续循环传送到当前玩家, 直到其消失 (离开/角色销毁/死亡)
+					-- 持续循环传送到当前敌对玩家, 直到其消失 (离开/角色销毁/死亡/变同队)
 					while State.loopTpAllEnabled do
 						local p = Players:FindFirstChild(currentTarget)
 						if not p then break end
+						if p.Team == myTeam then break end  -- 变成同队, 跳过
 						local char = p.Character
 						if not char or not char:FindFirstChild("HumanoidRootPart") then break end
 						local hum = char:FindFirstChildOfClass("Humanoid")
@@ -2303,6 +2375,8 @@ do
 	makeSectionLabel(page, "自旋")
 	makeToggle(page, "自旋开关", function(v) setSpin(v) end)
 	makeSlider(page, "自旋速度", 0.5, 100, 5, "", function(v) State.spinSpeed = v end)
+	makeSectionLabel(page, "无限跳")
+	makeToggle(page, "无限跳", function(v) State.infJumpEnabled = v end)
 end
 
 --========================================================
@@ -2469,7 +2543,14 @@ do
 
 	makeSectionLabel(page, "循环传送")
 	local loopTpToggle = makeToggle(page, "循环传送指定玩家", function(v) setLoopTp(v) end)
-	local loopTpAllToggle = makeToggle(page, "循环传送所有玩家", function(v) setLoopTpAll(v) end)
+	local loopTpAllToggle = makeToggle(page, "循环传送敌对玩家", function(v) setLoopTpAll(v) end)
+end
+
+-- 交互页
+do
+	local page = addTab("交互", "✋")
+	makeSectionLabel(page, "ProximityPrompt")
+	makeToggle(page, "秒交互 (ProximityPrompt)", function(v) setInstantPrompt(v) end)
 end
 
 -- 设置页
@@ -3113,6 +3194,8 @@ ResetAndDestroy = function()
 	-- 关闭循环传送
 	if State.loopTpEnabled then setLoopTp(false) end
 	if State.loopTpAllEnabled then setLoopTpAll(false) end
+	-- 关闭秒交互
+	if State.promptInstantEnabled then setInstantPrompt(false) end
 	-- 关闭移速开关 (恢复默认移速, 但保留已调节的参数值)
 	State.speedEnabled = false
 	applyWalkSpeed()
