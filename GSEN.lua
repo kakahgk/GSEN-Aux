@@ -350,6 +350,14 @@ local Theme = {
 local FontMain = Enum.Font.GothamMedium
 local FontBold = Enum.Font.GothamBold
 
+-- 清理旧实例, 防止重复执行脚本时旧 GUI 残留导致修改不生效
+do
+	local oldMain = playerGui:FindFirstChild("GSEN_Menu")
+	if oldMain then oldMain:Destroy() end
+	local oldOverlay = playerGui:FindFirstChild("WindUI_Overlay")
+	if oldOverlay then oldOverlay:Destroy() end
+end
+
 -- 根 ScreenGui
 local MainGui = trackInstance(Instance.new("ScreenGui"))
 MainGui.Name = "GSEN_Menu"
@@ -408,6 +416,84 @@ do
 				startPos.X.Scale, startPos.X.Offset + delta.X,
 				startPos.Y.Scale, startPos.Y.Offset + delta.Y
 			)
+		end
+	end))
+end
+
+-- 右下角缩放把手 (白色半透明空心圆角正方形), 拖动等比例调整窗口大小, 内容随容器自适应
+do
+	local WSAR = 460 / 330 -- 锁定宽高比, 保证内容排版不破版
+	local MINW = 360  -- 最小宽度, 防止过度缩小
+	-- handle 挂到 Window 的父级 MainGui, 使正方形可溢出窗口显示(不受 Window.ClipsDescendants 裁切)
+	-- 通过监听 Window 的 Size/Position 变化, 让矩形中心始终跟随窗口右下角
+	local handle = trackInstance(Instance.new("ImageButton"))
+	handle.Size = UDim2.fromOffset(32, 32)
+	handle.AnchorPoint = Vector2.new(0.5, 0.5) -- 中心对准窗口右下角
+	handle.BackgroundTransparency = 1
+	handle.ZIndex = 100 -- 在窗口内容之上
+	handle.Parent = MainGui -- 挂到 MainGui, 溢出可用 ClipsDescendants
+
+	-- 圆角正方形边框 (空心, 白色半透明描边)
+	local box = trackInstance(Instance.new("Frame"))
+	box.Size = UDim2.fromOffset(32, 32)
+	box.AnchorPoint = Vector2.new(0.5, 0.5)
+	box.Position = UDim2.fromScale(0.5, 0.5) -- 相对 handle 居中
+	box.BackgroundTransparency = 1 -- 空心
+	box.BorderSizePixel = 0
+	box.ZIndex = 100
+	local boxC = trackInstance(Instance.new("UICorner"))
+	boxC.CornerRadius = UDim.new(0, 6) -- 圆角6px
+	boxC.Parent = box
+	local boxStroke = trackInstance(Instance.new("UIStroke"))
+	boxStroke.Color = Color3.fromRGB(255, 255, 255) -- 白色边框
+	boxStroke.Thickness = 1.2
+	boxStroke.Transparency = 0.3 -- 半透明
+	boxStroke.Parent = box
+	box.Parent = handle
+
+	-- 同步 handle 位置到窗口右下角 (MainGui 坐标系, 相对 MainGui 的百分比+偏移)
+	local function syncHandlePos()
+		handle.Position = UDim2.new(
+			Window.Position.X.Scale, Window.Position.X.Offset + Window.Size.X.Offset,
+			Window.Position.Y.Scale, Window.Position.Y.Offset + Window.Size.Y.Offset
+		)
+	end
+	syncHandlePos()
+	-- handle 挂到 MainGui 后不受 Window.Visible 传播, 需手动同步可见性
+	local function syncHandleVisible()
+		handle.Visible = Window.Visible
+	end
+	syncHandleVisible()
+	-- 监听窗口位置/大小变化(拖拽移动、缩放均会触发), 实时跟随
+	trackConnection(Window:GetPropertyChangedSignal("Position"):Connect(syncHandlePos))
+	trackConnection(Window:GetPropertyChangedSignal("Size"):Connect(syncHandlePos))
+	-- 监听窗口可见性变化(隐藏/显示菜单), 同步缩放把手
+	trackConnection(Window:GetPropertyChangedSignal("Visible"):Connect(syncHandleVisible))
+
+	-- 拖拽缩放
+	local resizing, resStart, resWinW
+	trackConnection(handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			resizing = true
+			resStart = input.Position
+			resWinW = Window.Size.X.Offset
+		end
+	end))
+	trackConnection(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			resizing = false
+		end
+	end))
+	trackConnection(UserInputService.InputChanged:Connect(function(input)
+		if resizing and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			local dx = input.Position.X - resStart.X
+			local dy = input.Position.Y - resStart.Y
+			local delta = dx
+			if math.abs(dy) > math.abs(dx) then delta = dy end
+			local base = resWinW or 460
+			local nw = math.max(MINW, base + delta)
+			local nh = nw / WSAR
+			Window.Size = UDim2.fromOffset(nw, nh)
 		end
 	end))
 end
@@ -2120,6 +2206,93 @@ local function showToast(text)
 	end)
 end
 
+-- 二次确认弹窗
+local function showConfirmDialog(message, onConfirm)
+	local overlay = Instance.new("Frame")
+	overlay.Name = "ConfirmOverlay"
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	overlay.BackgroundTransparency = 0.5
+	overlay.BorderSizePixel = 0
+	overlay.ZIndex = 100
+	overlay.Parent = MainGui
+
+	local dialog = Instance.new("Frame")
+	dialog.Name = "ConfirmDialog"
+	dialog.Size = UDim2.fromOffset(340, 160)
+	dialog.Position = UDim2.new(0.5, -170, 0.5, -80)
+	dialog.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+	dialog.BorderSizePixel = 0
+	dialog.ZIndex = 101
+	dialog.Parent = overlay
+
+	local dc = Instance.new("UICorner")
+	dc.CornerRadius = UDim.new(0, 10)
+	dc.Parent = dialog
+
+	local ds = Instance.new("UIStroke")
+	ds.Color = Color3.fromRGB(255, 255, 255)
+	ds.Thickness = 1
+	ds.Transparency = 0.5
+	ds.Parent = dialog
+
+	local msg = Instance.new("TextLabel")
+	msg.Size = UDim2.new(1, -24, 1, -64)
+	msg.Position = UDim2.fromOffset(12, 12)
+	msg.BackgroundTransparency = 1
+	msg.Text = message
+	msg.TextColor3 = Color3.fromRGB(255, 255, 255)
+	msg.Font = Enum.Font.GothamBold
+	msg.TextSize = 15
+	msg.TextWrapped = true
+	msg.TextXAlignment = Enum.TextXAlignment.Center
+	msg.TextYAlignment = Enum.TextYAlignment.Center
+	msg.ZIndex = 102
+	msg.Parent = dialog
+
+	local btnNo = Instance.new("TextButton")
+	btnNo.Size = UDim2.new(0.5, -16, 0, 36)
+	btnNo.Position = UDim2.new(0, 8, 1, -44)
+	btnNo.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	btnNo.Text = "取消"
+	btnNo.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btnNo.Font = Enum.Font.GothamBold
+	btnNo.TextSize = 14
+	btnNo.BorderSizePixel = 0
+	btnNo.ZIndex = 102
+	btnNo.Parent = dialog
+
+	local btnNoCorner = Instance.new("UICorner")
+	btnNoCorner.CornerRadius = UDim.new(0, 6)
+	btnNoCorner.Parent = btnNo
+
+	local btnYes = Instance.new("TextButton")
+	btnYes.Size = UDim2.new(0.5, -16, 0, 36)
+	btnYes.Position = UDim2.new(0.5, 8, 1, -44)
+	btnYes.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+	btnYes.Text = "确认删除"
+	btnYes.TextColor3 = Color3.fromRGB(255, 255, 255)
+	btnYes.Font = Enum.Font.GothamBold
+	btnYes.TextSize = 14
+	btnYes.BorderSizePixel = 0
+	btnYes.ZIndex = 102
+	btnYes.Parent = dialog
+
+	local btnYesCorner = Instance.new("UICorner")
+	btnYesCorner.CornerRadius = UDim.new(0, 6)
+	btnYesCorner.Parent = btnYes
+
+	local function close()
+		if overlay.Parent then overlay:Destroy() end
+	end
+
+	btnNo.MouseButton1Click:Connect(close)
+	btnYes.MouseButton1Click:Connect(function()
+		close()
+		if onConfirm then onConfirm() end
+	end)
+end
+
 -- 兼容多种执行器的 HTTP 请求
 local function httpRequest(url)
 	-- 优先使用执行器自带 HTTP
@@ -2281,6 +2454,65 @@ setChatTranslation = function(on)
 		local cAdd = Players.PlayerAdded:Connect(hookPlayer)
 		table.insert(chatTranslateConns, cAdd)
 		trackConnection(cAdd)
+
+		-- 3) 旧版 Chat Service: 监听 Chat 消息 (捕获 Global 等自定义频道)
+		local ok3 = pcall(function()
+			local ChatService = game:GetService("Chat")
+			-- 监听 Chat.MessageReceived (旧版聊天事件)
+			local conn = ChatService.ChildAdded:Connect(function(child)
+				if child:IsA("Message") or child:IsA("TextLabel") then
+					-- 尝试从消息对象提取发送者和内容
+					local msgText = ""
+					local speakerName = "Unknown"
+					pcall(function()
+						if child:GetAttribute("Message") then
+							msgText = child:GetAttribute("Message")
+						elseif child:GetAttribute("Text") then
+							msgText = child:GetAttribute("Text")
+						end
+						if child:GetAttribute("Speaker") then
+							speakerName = child:GetAttribute("Speaker")
+						elseif child:GetAttribute("FromSpeaker") then
+							speakerName = child:GetAttribute("FromSpeaker")
+						end
+					end)
+					if msgText and msgText ~= "" then
+						handleChatMessage(speakerName, msgText, nil)
+					end
+				end
+			end)
+			if conn then
+				table.insert(chatTranslateConns, conn)
+				trackConnection(conn)
+			end
+		end)
+
+		-- 4) 监听 Player.Chatted (更底层的聊天事件, 捕获所有频道)
+		local ok4 = pcall(function()
+			for _, p in ipairs(Players:GetPlayers()) do
+				if p ~= LocalPlayer then
+					local conn = p.Chatted:Connect(function(msg)
+						handleChatMessage(p.DisplayName, msg, p.UserId)
+					end)
+					if conn then
+						table.insert(chatTranslateConns, conn)
+						trackConnection(conn)
+					end
+				end
+			end
+			local cChatAdd = Players.PlayerAdded:Connect(function(p)
+				if p == LocalPlayer then return end
+				local conn = p.Chatted:Connect(function(msg)
+					handleChatMessage(p.DisplayName, msg, p.UserId)
+				end)
+				if conn then
+					table.insert(chatTranslateConns, conn)
+					trackConnection(conn)
+				end
+			end)
+			table.insert(chatTranslateConns, cChatAdd)
+			trackConnection(cChatAdd)
+		end)
 
 		-- HTTP 不可用提示
 		if not ok1 and not pcall(function() return http_request or (syn and syn.request) or request or HttpService end) then
@@ -5258,20 +5490,23 @@ do
 			showToast("✗ 请先选择一个配置")
 			return
 		end
-		local ok, err = deleteConfig(selectedConfig)
-		if ok then
-			showToast("✓ 配置已删除\n名称: " .. selectedConfig)
-			local newList = scanConfigs()
-			configDropdown.refresh(newList)
-			if #newList == 0 then
-				configDropdown.valLbl.Text = "(无配置)"
+		local configName = selectedConfig
+		showConfirmDialog("确认删除配置？\n名称: " .. configName, function()
+			local ok, err = deleteConfig(configName)
+			if ok then
+				showToast("✓ 配置已删除\n名称: " .. configName)
+				local newList = scanConfigs()
+				configDropdown.refresh(newList)
+				if #newList == 0 then
+					configDropdown.valLbl.Text = "(无配置)"
+				else
+					configDropdown.valLbl.Text = "(选择配置)"
+				end
+				selectedConfig = nil
 			else
-				configDropdown.valLbl.Text = "(选择配置)"
+				showToast("✗ 删除失败\n" .. tostring(err))
 			end
-			selectedConfig = nil
-		else
-			showToast("✗ 删除失败\n" .. tostring(err))
-		end
+		end)
 	end)
 
 	makeSectionLabel(page, "说明")
@@ -5327,6 +5562,9 @@ end
 -- Library:Notify -> showToast, Library.Toggles -> KS_Toggles, Library.Options -> 局部变量
 --========================================================
 -- 用 IIFE 包裹, 避免开山模块的局部变量挤占主脚本 200 个局部变量上限
+-- 开山模块仅在「开采一座山」中加载 (UniverseId: 10187294555)
+local KAISHAN_UNIVERSE_ID = 10187294555
+local isKaishanGame = (game.GameId == KAISHAN_UNIVERSE_ID)
 local function initKaishan()
   -- Config / Services / State / Storage / Connections (来自原脚本, 保持不变)
 local Config={MinCrystalValue="2m",SpeedBoost=35,NormalSpeed=16,FlySpeed=100,AutoRejoinBoulders=false,AutoBuyBombs=false,RuneGrabRange=20,PickRange=13,PickBurst=8,AutoSellThreshold=0.5,MountainCenter=Vector3.new(42.67,1066.7,102.2),MountainRadius=862.7,RemotesFolder="Remotes",KeybindMenu="RightControl",KeybindAimTp="F"}
@@ -5367,8 +5605,17 @@ local function resolveGuiRoot()local ok,hidden=pcall(function()return gethui()en
 local GuiRoot=resolveGuiRoot()
 for _,container in ipairs({GuiRoot,Services.CoreGui})do for _,name in ipairs({"UniverseESPGui","UniverseCrystalEsp"})do pcall(function()local e=container:FindFirstChild(name)if e then e:Destroy()end end)end end
 
--- 查找远程
-local function findRemote(name)local f=Services.ReplicatedStorage:FindFirstChild(Config.RemotesFolder)or Services.ReplicatedStorage:WaitForChild(Config.RemotesFolder,10)if not f then return nil end;return f:FindFirstChild(name)or f:WaitForChild(name,5)end
+-- 查找远程 (缓存 Remotes 文件夹查找, 避免在其他游戏中重复 WaitForChild 阻塞)
+local RemotesFolderCache
+local function getRemotesFolder()
+  if RemotesFolderCache ~= nil then return RemotesFolderCache end
+  RemotesFolderCache = Services.ReplicatedStorage:FindFirstChild(Config.RemotesFolder)
+  if not RemotesFolderCache then
+    RemotesFolderCache = Services.ReplicatedStorage:WaitForChild(Config.RemotesFolder, 3)
+  end
+  return RemotesFolderCache
+end
+local function findRemote(name)local f=getRemotesFolder()if not f then return nil end;return f:FindFirstChild(name)or f:WaitForChild(name,2)end
 local Remotes={SellRequest=findRemote("SellRequest"),GoHome=findRemote("GoHome"),HoldComplete=findRemote("CrystalHoldComplete"),ToggleFavorite=findRemote("ToggleFavorite"),DigRequest=findRemote("DigRequest"),BombShopQuery=findRemote("BombShopQuery"),BombBuyRequest=findRemote("BombBuyRequest"),BombShopRestocked=findRemote("BombShopRestocked"),PlotPlaceRequest=findRemote("PlotPlaceRequest")}
 
 local ESP={font=Enum.Font.GothamBold,sweep=0.5,budget=0.005,offset=Vector3.new(0,3,0),width=250,height=66,text=16,ttl=5}
@@ -5378,12 +5625,12 @@ local PACE={boost=Config.SpeedBoost,normal=Config.NormalSpeed,stats=0.25,distanc
 local TP={offset=Vector3.new(0,4.5,0),hold=0.35,clear={Vector3.new(0,0,0),Vector3.new(0,3,0),Vector3.new(0,7,0),Vector3.new(5,3,0),Vector3.new(-5,3,0),Vector3.new(0,3,5),Vector3.new(0,3,-5),Vector3.new(0,12,0),Vector3.new(9,6,0),Vector3.new(-9,6,0),Vector3.new(0,6,9),Vector3.new(0,6,-9),Vector3.new(0,20,0)}}
 local PICK={aimRange=5000,aimDot=0.995,range=Config.PickRange,cooldown=0.04,restore=0.2,burst=Config.PickBurst,retry=0.15,forget=5,pad=4,instantRadius=60,instantTick=0.25}
 local COLORS={money=Color3.fromRGB(60,255,90),default=Color3.fromRGB(0,225,255),extra=Color3.fromRGB(255,255,255),player=Color3.fromRGB(255,40,140),stroke=Color3.fromRGB(0,0,0),hexDistance="00E5FF",hexLuck="FFC400"}
-local TIER_NAMES={"普通","罕见","稀有","史诗","传说","神话"}
-local LUCK={rarity={1,1.6,2.6,4.2,7,12},base=0.00045,exponent=0.5,cap=500,bomb=3,blood=4}
+local TIER_NAMES={"普通","罕见","稀有","史诗","传说","神话","至高","Pulsar","Quasar"}
+local LUCK={rarity={1,1.6,2.6,4.2,7,12,20,32,50},base=0.00045,exponent=0.5,cap=500,bomb=3,blood=4}
 local MUTATION_LUCK={Verdant=15,Voltaic=20,Gilded=18,Onyx=28,Terminus=40,Frost=1.4,Fire=1.4,Thunder=1.5,Starfall=1.3,Aurora=2.2,Radioactive=2,Poison=1.5,Wet=1}
 local WATCHED_ATTRIBUTES={"Value","Collected","WeightKg","Tier","TierName","CrystalName","Mutation","ExtraMutations"}
 local SUFFIXES={"","k","M","B","T","Qa"}
-local PARSE_MULTIPLIERS={k=1e3,m=1e6,b=1e9,t=1e12,qa=1e15}
+local PARSE_MULTIPLIERS={k=1e3,m=1e6,b=1e9,t=1e12,qa=1e15,["%"]=1}
 local CONTAINER_NAMES={"DroppedCrystals","Crystals"}
 
 local EspHolder=trackInstance(Instance.new("Folder"))EspHolder.Name="UniverseCrystalEsp"EspHolder.Parent=GuiRoot
@@ -5394,7 +5641,7 @@ local function formatShort(n,prefix)n=tonumber(n)or 0;prefix=prefix or"";local s
 local function formatWeight(kg)kg=tonumber(kg)or 0;if kg>=1000 then return formatShort(kg/1000).."t"end;return string.format("%.1fkg",kg)end
 local function formatDistance(studs)studs=tonumber(studs)or 0;if studs>=1000 then return string.format("%.1fkm",studs/1000)end;return string.format("%dm",math.floor(studs+0.5))end
 local function formatLuck(score)local pct=(tonumber(score)or 0)*100;if pct<=0 then return"+0%"end;if pct<1 then return string.format("+%.2f%%",pct)end;if pct<10 then return string.format("+%.1f%%",pct)end;return string.format("+%.0f%%",pct)end
-local function parseValue(text)if type(text)~="string"then return nil end;local cleaned=text:lower():gsub("[%s,%$_]","")if cleaned==""then return 0 end;local number,suffix=cleaned:match("^(%d*%.?%d+)(%a*)$")if not number then return nil end;local base=tonumber(number)if not base then return nil end;if suffix==""then return base end;local mult=PARSE_MULTIPLIERS[suffix]if not mult then return nil end;return base*mult end
+local function parseValue(text)if type(text)~="string"then return nil end;local cleaned=text:lower():gsub("[%s,%$_%%]","")if cleaned==""then return 0 end;local number,suffix=cleaned:match("^(%d*%.?%d+)(%a*)$")if not number then return nil end;local base=tonumber(number)if not base then return nil end;if suffix==""then return base end;local mult=PARSE_MULTIPLIERS[suffix]if not mult then return nil end;return base*mult end
 local function bindCharacter(character)if not character then State.rootPart=nil;return end;State.rootPart=character:FindFirstChild("HumanoidRootPart")end
 bindCharacter(LocalPlayer.Character)
 Connections.characterConn=trackConnection(LocalPlayer.CharacterAdded:Connect(function(character)State.rootPart=nil;State.tpState=nil;local waiter;waiter=character.ChildAdded:Connect(function(child)if child.Name=="HumanoidRootPart"then State.rootPart=child;waiter:Disconnect()end end)bindCharacter(character)if State.rootPart then waiter:Disconnect()end end))
@@ -5411,7 +5658,21 @@ local function combinedLuckMult(inst)local mutation=getAttr(inst,"Mutation")loca
 local function computeLuck(inst)local tier=crystalTier(inst)if tier<=0 then return 0 end;local weight=math.max(0,crystalWeight(inst))local base=(LUCK.rarity[tier]or LUCK.rarity[1])*math.min(weight,LUCK.cap)^LUCK.exponent*LUCK.base;if getAttr(inst,"BombCrystal")==true then base*=LUCK.bomb end;return base*combinedLuckMult(inst)end
 local function luckLabel(inst)local hover=inst:FindFirstChild("CrystalHover")if not hover then return nil end;local label=hover:FindFirstChild("LuckBoost")if not label or not label:IsA("TextLabel")then return nil end;return label end
 local function luckLabelText(inst)local label=luckLabel(inst)if not label then return nil end;return label.Text end
-local function crystalLuck(inst)local text=luckLabelText(inst)if type(text)=="string"then local pct=tonumber(text:match("([%d%.]+)%s*%%"))if pct and pct>0 then return pct/100 end end;return computeLuck(inst)end
+local function tryParseLuckNumber(v)if v==nil then return nil end;local num=tonumber(v)if num and num>0 then return num>100 and num/100 or num end;if type(v)=="string"then local parsed=parseValue(v:match("([%d%.%,]+%a*)")or v)if parsed and parsed>0 then return parsed>100 and parsed/100 or parsed end end;return nil end
+local luckDebugDone=false
+local function crystalLuck(inst) -- 方法1(优先): 从标签文本读取, 乘以变异倍率 (标签显示基础幸运, 需乘变异倍率得到总幸运)
+local mult=combinedLuckMult(inst)
+local text=luckLabelText(inst)if type(text)=="string"and text~=""then local numPart=text:match("([%d%.%,]+%a*)%s*%%")if numPart then local pct=parseValue(numPart)if pct and pct>0 then return(pct/100)*mult end end;local xPart=text:match("[xX]%s*([%d%.]+)")or text:match("([%d%.]+)%s*[xX]")if xPart then local m=parseValue(xPart)if m and m>0 then return m*mult end end;local plainNum=text:match("([%d%.]+)")if plainNum then local val=tonumber(plainNum)or parseValue(plainNum)if val and val>0 then return(val>100 and val/100 or val)*mult end end end -- 方法1.5: 扫描水晶所有子对象中的 TextLabel (扩大搜索, 查找含%的幸运文本), 乘以变异倍率
+for _,child in ipairs(inst:GetChildren())do if child:IsA("BillboardGui")or child.Name=="CrystalHover"then for _,desc in ipairs(child:GetDescendants())do if(desc:IsA("TextLabel")or desc:IsA("TextButton"))and type(desc.Text)=="string"then local t=desc.Text;if t:find("%%")or t:lower():find("luck")then local np=t:match("([%d%.%,]+%a*)%s*%%")if np then local pv=parseValue(np)if pv and pv>0 then return(pv/100)*mult end end end end end end end -- 方法2: 从水晶实例属性直接读取, 乘以变异倍率得到总幸运 (基础幸运×变异倍率=总幸运)
+local attrVal=getAttr(inst,"LuckBoost")if attrVal~=nil then local r=tryParseLuckNumber(attrVal)if r then return r*combinedLuckMult(inst)end end -- 方法3: 从子对象读取 (IntValue/NumberValue), 乘以变异倍率
+local luckObj=inst:FindFirstChild("LuckBoost")if luckObj and luckObj:IsA("ValueBase")then local r=tryParseLuckNumber(luckObj.Value)if r then return r*combinedLuckMult(inst)end end -- 方法4: 遍历水晶所有属性找幸运值, 乘以变异倍率
+local ok,enum=pcall(inst.GetAttributes,inst)if ok and enum then for name,v in pairs(enum)do if name:lower():find("luck")then local r=tryParseLuckNumber(v)if r then return r*combinedLuckMult(inst)end end end end -- 方法5: 从 CrystalHover 属性读取, 乘以变异倍率
+local hover=inst:FindFirstChild("CrystalHover")if hover then local ok2,enum2=pcall(hover.GetAttributes,hover)if ok2 and enum2 then for name,v in pairs(enum2)do if name:lower():find("luck")then local r=tryParseLuckNumber(v)if r then return r*combinedLuckMult(inst)end end end end end -- 调试: 首次打印水晶属性+子对象+PlayerGui 帮助诊断
+if not luckDebugDone then luckDebugDone=true -- 打印水晶所有属性
+local parts={}local ok3,enum3=pcall(inst.GetAttributes,inst)if ok3 and enum3 then for k,v in pairs(enum3)do parts[#parts+1]=tostring(k).."="..tostring(v)end end;print("[GSEN调试] 水晶属性: "..table.concat(parts,", ")) -- 打印水晶所有子对象 (递归)
+local function dumpChildren(obj,depth)for _,child in ipairs(obj:GetChildren())do local prefix=string.rep("  ",depth)local childInfo=prefix..child.Name.." ("..child.ClassName..")"if child:IsA("TextLabel")or child:IsA("TextButton")then childInfo=childInfo.." Text=\""..tostring(child.Text).."\""end;if child:IsA("ValueBase")then childInfo=childInfo.." Value="..tostring(child.Value)end;local okAttr,childAttr=pcall(child.GetAttributes,child)if okAttr and childAttr then local attrStrs={}for k,v in pairs(childAttr)do attrStrs[#attrStrs+1]=tostring(k).."="..tostring(v)end;if #attrStrs>0 then childInfo=childInfo.." Attr:{"..table.concat(attrStrs,",").."}"end end;print("[GSEN调试] "..childInfo)dumpChildren(child,depth+1)end end;print("[GSEN调试] 水晶子对象树:")dumpChildren(inst,1) -- 扫描 PlayerGui 中与水晶/luck相关的GUI
+local pGui=LocalPlayer:WaitForChild("PlayerGui")if pGui then print("[GSEN调试] 扫描PlayerGui中包含luck/运气的元素:")for _,screen in ipairs(pGui:GetChildren())do if screen:IsA("ScreenGui")or screen:IsA("BillboardGui")then local function scanGui(obj)for _,child in ipairs(obj:GetChildren())do if child:IsA("TextLabel")or child:IsA("TextButton")then local t=tostring(child.Text)if t:lower():find("luck")or t:find("运气")or t:find("幸运")then print("[GSEN调试] PlayerGui: "..child:GetFullName().." Text=\""..t.."\"")end end;scanGui(child)end end;scanGui(screen)end end end end -- 回退到公式估算
+return computeLuck(inst)end
 local function meetsFilter(inst,value)if not State.valueFilter then return true end;return(value or crystalValue(inst))>=State.minValue end
 local function meetsWeightFilter(inst,weight)if not State.weightFilter then return true end;return(weight or crystalWeight(inst))>=State.minWeight end
 local function meetsLuckFilter(inst,luck)if not State.luckFilter then return true end;local ok,actual=pcall(crystalLuck,inst)if not ok then return true end;return(luck or actual)>=State.minLuck end
@@ -5566,7 +5827,7 @@ do
  local function install()local GLIDE_SPEED=350;local AIM_RATE=9;local SNAP_GAP=0.35;local RESPONSE=200;local STREAM_GAP=0.5;local HOLD_FORCE=1e7;local HOLD_TORQUE=1e7;local attachment;local mover;local aligner;local cursor;local facing;local goalFrame;local aimSpot;local streamClock=0;local glideConn;local running=false
  local function humanoidOf()local character=LocalPlayer.Character;return character and character:FindFirstChildOfClass("Humanoid")end
  local function detach()if mover then pcall(function()mover:Destroy()end)mover=nil end;if aligner then pcall(function()aligner:Destroy()end)aligner=nil end;if attachment then pcall(function()attachment:Destroy()end)attachment=nil end end
- local function attach(root)detach()local ok=pcall(function()local point=Instance.new("Attachment")point.Name="UniverseGlidePoint";point.Parent=root;local position=Instance.new("AlignPosition")position.Name="UniverseGlidePosition";position.Mode=Enum.PositionAlignmentMode.OneAttachment;position.Attachment0=point;position.RigidityEnabled=false;position.ApplyAtCenterOfMass=true;position.ReactionForceEnabled=false;position.MaxForce=HOLD_FORCE;position.MaxVelocity=math.huge;position.Responsiveness=RESPONSE;position.Position=root.Position;position.Parent=root;local orientation=Instance.new("AlignOrientation")orientation.Name="UniverseGlideOrientation";orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment;orientation.Attachment0=point;orientation.RigidityEnabled=false;orientation.ReactionForceEnabled=false;orientation.MaxTorque=HOLD_TORQUE;orientation.MaxAngularVelocity=math.huge;orientation.Responsiveness=RESPONSE;orientation.CFrame=root.CFrame.Rotation;orientation.Parent=root;attachment=point;mover=position;aligner=orientation end)if not ok then detach()end;return ok end
+ local function attach(root)detach()local ok=pcall(function()local point=Instance.new("Attachment")point.Name="UniverseGlidePoint";point.Parent=root;local position=Instance.new("AlignPosition")position.Name="UniverseGlidePosition";position.Mode=Enum.PositionAlignmentMode.OneAttachment;position.Attachment0=point;position.RigidityEnabled=false;position.ApplyAtCenterOfMass=true;position.ReactionForceEnabled=false;position.MaxForce=HOLD_FORCE;position.MaxVelocity=math.huge;position.Responsiveness=RESPONSE;position.Position=root.Position;position.Parent=root;local orientation=Instance.new("AlignOrientation")orientation.Name="UniverseGlideOrientation";orientation.Mode=Enum.OrientationAlignmentMode.OneAttachment;orientation.Attachment0=point;orientation.RigidityEnabled=false;orientation.ReactionTorqueEnabled=false;orientation.MaxTorque=HOLD_TORQUE;orientation.MaxAngularVelocity=math.huge;orientation.Responsiveness=RESPONSE;orientation.CFrame=root.CFrame.Rotation;orientation.Parent=root;attachment=point;mover=position;aligner=orientation end)if not ok then detach()end;return ok end
  local function step(deltaTime)if not goalFrame then return end;local root=getRoot()if not root then return end;if not mover or mover.Parent~=root or not aligner or aligner.Parent~=root then if not attach(root)then return end;cursor=root.Position;facing=root.CFrame.Rotation end;local humanoid=humanoidOf()if humanoid and not humanoid.PlatformStand then pcall(function()humanoid.PlatformStand=true end)end;cursor=cursor or root.Position;facing=facing or root.CFrame.Rotation;local delta=goalFrame.Position-cursor;local span=GLIDE_SPEED*deltaTime;if delta.Magnitude<=math.max(span,SNAP_GAP)then cursor=goalFrame.Position else cursor+=delta.Unit*span end;streamClock+=deltaTime;if streamClock>=STREAM_GAP then streamClock=0;requestStream(goalFrame.Position)end;local look=goalFrame.Rotation;if aimSpot then local gap=aimSpot-cursor;if gap.Magnitude>0.1 then look=CFrame.lookAt(cursor,aimSpot).Rotation end end;facing=facing:Lerp(look,1-math.exp(-AIM_RATE*deltaTime))mover.Position=cursor;aligner.CFrame=facing end
  function Move.glide(goal,aim)if typeof(goal)~="CFrame"then return false end;goalFrame=goal;aimSpot=typeof(aim)=="Vector3"and aim or nil;if not running then running=true;local root=getRoot()if root then cursor=root.Position;facing=root.CFrame.Rotation;attach(root)end end;if not glideConn then glideConn=Services.RunService.Heartbeat:Connect(function(deltaTime)if not running then return end;local ok,err=pcall(step,deltaTime)if not ok then reportError("滑翔",err)end end)end;return true end
  function Move.glideStop()running=false;goalFrame=nil;aimSpot=nil;cursor=nil;facing=nil;streamClock=0;if glideConn then glideConn:Disconnect()glideConn=nil end;detach()local root=getRoot()if root then pcall(function()root.AssemblyLinearVelocity=Vector3.zero;root.AssemblyAngularVelocity=Vector3.zero end)end;local humanoid=humanoidOf()if humanoid then pcall(function()humanoid.PlatformStand=false;humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)end)end end end
@@ -5576,7 +5837,8 @@ end
 --========================================================
 -- UI 构建 (使用 GSENAux 辅助函数, 全部放入 开山 单页面)
 --========================================================
-local page = addTab("开山", "⛰️")
+-- 仅在「开采一座山」中创建开山标签页 (UniverseId: 10187294555)
+local page = isKaishanGame and addTab("开山", "⛰️") or nil
 
 -- 简易文本输入 (最小价值用; GSENAux 无现成文本输入辅助)
 local function makeTextInput(parent, text, default, placeholder, callback)
@@ -5643,13 +5905,14 @@ local function ksRegSlider(key, sliderHandle, default, onApply)
 end
 
 -- 水晶ESP
+if isKaishanGame then
 makeSectionLabel(page, "水晶ESP")
 local espToggle=makeToggle(page, "水晶ESP", function(value) KS_Config.espActive=value; State.espActive=value; if not value then clearEsp() end; updateTracking() end)
 ksRegToggle("espActive", espToggle, false, function(v) State.espActive=v; if not v then clearEsp() end; updateTracking() end)
 local espScaleSlider=makeSlider(page, "水晶大小", 40, 250, 70, "%", function(value) KS_Config.espScale=value/100; State.espScale=value/100; applyEspScale() end)
 ksRegSlider("espScale", espScaleSlider, 0.7, function(v) State.espScale=v; applyEspScale() end)
 makeSectionLabel(page, "品质过滤 (只显示勾选的品质)")
-local tierKeys={"tier1","tier2","tier3","tier4","tier5","tier6"}
+local tierKeys={"tier1","tier2","tier3","tier4","tier5","tier6","tier7","tier8","tier9"}
 for i=1,#TIER_NAMES do local tier=i;local t=makeToggle(page, TIER_NAMES[tier], function(value) KS_Config[tierKeys[tier]]=value; State.tierFilter[tier]=value;requestRefresh()end)t.set(true)ksRegToggle(tierKeys[tier],t,true,function(v) State.tierFilter[tier]=v;requestRefresh()end)end
 makeSectionLabel(page, "最小价值会隐藏并跳过低于此价值的水晶。支持单位: k/m/b/t (如 500k, 2m, 1.5b)。留空显示全部")
 local function setMinValue(text)local parsed=parseValue(text)if not parsed then return end;State.minValue=math.max(parsed,0)State.valueFilter=State.minValue>0;requestRefresh()end
@@ -5719,11 +5982,6 @@ do
  local prompts=Services.CoreGui:FindFirstChild("RobloxPromptGui")local overlay=prompts and prompts:FindFirstChild("promptOverlay")if overlay then Storage.netConns[#Storage.netConns+1]=trackConnection(overlay.ChildAdded:Connect(function(child)if child.Name:find("ErrorPrompt")then task.delay(BACK_DELAY,Net.rejoin)end end))end end
  install()
 end
-
--- 跳服 UI
-makeSectionLabel(page, "跳服")
-makeButton(page, "跳服 (随机切换服务器)", function() if not Net.busy() then if not Net.hop() then showToast("跳服启动失败") end else showToast("跳服进行中...") end end)
-makeButton(page, "重进当前服", function() Net.rejoin() end)
 
 -- 巨石农场模块
 local Farm={}
@@ -5843,11 +6101,28 @@ do
  install()
 end
 
+
+-- 跳服 UI (移至开山页最后)
+makeSectionLabel(page, "跳服")
+makeButton(page, "跳服 (随机切换服务器)", function() if not Net.busy() then if not Net.hop() then showToast("跳服启动失败") end else showToast("跳服进行中...") end end)
+makeButton(page, "重进当前服", function() Net.rejoin() end)
+end -- if isKaishanGame
+
 -- 清理函数 (保留原脚本自管理卸载逻辑)
 local function cleanupAll()State.espActive=false;State.playerEspActive=false;State.aimTpEnabled=false;setSpeedBoost(false)finishTeleport()unwatchContainers()if Mountain.shutdown then Mountain.shutdown()end;if Move.shutdown then Move.shutdown()end;restoreInstantPrompts()table.clear(Storage.pendingActions)table.clear(Storage.promptRestores)table.clear(Storage.claimed)if Net.stop then Net.stop()end;for _,connection in ipairs(Storage.netConns)do if connection then connection:Disconnect()end end;table.clear(Storage.netConns)State.afkRunning=false;for _,connection in ipairs(Storage.afkConns)do if connection then connection:Disconnect()end end;table.clear(Storage.afkConns)if Farm and Farm.stop then Farm.stop()end;if Money and Money.stop then Money.stop()end;for key,connection in pairs(Connections)do if connection then connection:Disconnect()end end;table.clear(Connections)State.speedHooked=nil;clearRegistry()clearPlayerEsp()if EspHolder then EspHolder:Destroy()EspHolder=nil end;State.rootPart=nil;getgenv().UniverseLoaded=false;getgenv().UniverseUnload=nil end
 getgenv().UniverseUnload=cleanupAll
 end
-initKaishan()
+-- 仅在「开采一座山」中初始化开山模块 (UniverseId: 10187294555)
+local ksOk, ksErr = pcall(function()
+  if not isKaishanGame then
+    warn("[GSEN辅助] 当前游戏非开采一座山 (GameId="..tostring(game.GameId).."), 跳过开山模块")
+    return
+  end
+  initKaishan()
+end)
+if not ksOk then
+	warn("[GSEN辅助] 开山模块初始化失败: " .. tostring(ksErr))
+end
 --========================================================
 -- 开山模块 (集成版) 结束
 --========================================================
@@ -6429,4 +6704,4 @@ end))
 -- 初始化
 CountLabel.Visible = false
 applyWalkSpeed()
-print("[GSEN辅助 V113] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方")
+print("[GSEN辅助 V150] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方 | 幸运值多源解析 | 全品质过滤(9档) | 深度调试日志 | 删除配置二次确认弹窗 | 跳服移至开山页末尾 | initKaishan异常保护 | 聊天翻译支持Global频道 | Remotes文件夹查找缓存(其他游戏快速初始化) | UniverseId条件加载(非开采一座山跳过开山模块) | 幸运值=基础幸运×变异倍率(方法1-5全部乘变异倍率) | 修复金钱农场/巨石农场人物无法移动(滑翔AlignOrientation属性错误ReactionForceEnabled→ReactionTorqueEnabled) | 重复执行脚本时清理旧GUI(防旧实例残留导致修改不生效) | 删除重复拖拽缩放代码 | 右下角缩放把手:纯空心圆角正方形(UIStroke白色半透明1.2px描边,圆角6px,32×32) | 缩放把手正方形改为溢出窗口显示(handle挂到MainGui,不受Window.ClipsDescendants裁切,监听Window的Size/Position变化实时跟随窗口右下角) | 缩放把手可见性跟随悬浮窗(handle挂到MainGui后不受Window.Visible传播,监听GetPropertyChangedSignal事件隐藏菜单时正方形同步隐藏) | 修复V149版本号print字符串内嵌英文双引号导致的编译期语法错误(无报错但脚本全部不执行)")
