@@ -83,6 +83,7 @@ local Runtime = {
 local ConfigControls = {}  -- { {key=, get=, apply=} }
 local CONFIG_DIR  = "GSEN"
 local ANIM_CONFIG_FILE = CONFIG_DIR .. "/animMode.json"
+local AUTO_CFG_FILE = CONFIG_DIR .. "/autoLoadConfig.json"
 
 -- 兼容多种执行器的文件操作 (四层查找: _G / getfenv(0) / rawget / loadstring)
 local function resolveFileFunc(name)
@@ -867,7 +868,7 @@ sideCorner.CornerRadius = UDim.new(0, 10)
 sideCorner.Parent = Sidebar
 
 local TabList = trackInstance(Instance.new("ScrollingFrame"))
-TabList.Size = UDim2.new(1, -16, 1, -16)
+TabList.Size = UDim2.new(1, -16, 1, -58)
 TabList.Position = UDim2.new(0, 8, 0, 8)
 TabList.BackgroundTransparency = 1
 TabList.BorderSizePixel = 0
@@ -877,6 +878,66 @@ TabList.AutomaticCanvasSize = Enum.AutomaticSize.Y
 TabList.ScrollingDirection = Enum.ScrollingDirection.Y
 TabList.ClipsDescendants = true
 TabList.Parent = Sidebar
+
+-- 前向声明: 关于弹窗打开函数 (在设置页构建时赋值, 头像点击亦可用)
+local openAbout
+-- ---------- 标签栏下方留白: 玩家头像 (靠左, 垂直居中于留白) ----------
+local Avatar = trackInstance(Instance.new("ImageButton"))
+	Avatar.AutoButtonColor = false
+Avatar.Size = UDim2.fromOffset(32, 32)
+Avatar.Position = UDim2.new(0, 8, 1, -41)
+Avatar.BackgroundColor3 = Theme.TabBtn
+Avatar.ClipsDescendants = true
+Avatar.ZIndex = 30
+local avCorner = trackInstance(Instance.new("UICorner"))
+avCorner.CornerRadius = UDim.new(1, 0)
+avCorner.Parent = Avatar
+local avStroke = trackInstance(Instance.new("UIStroke"))
+avStroke.Color = Theme.Accent
+avStroke.Thickness = 1.5
+avStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+avStroke.Parent = Avatar
+Avatar.Parent = Sidebar
+-- 点击头像弹出关于弹窗
+trackConnection(Avatar.MouseButton1Click:Connect(function()
+	if openAbout then openAbout() end
+end))
+-- 异步获取 headshot 头像 (与 about 页用法一致)
+pcall(function()
+	local ok, thumb = pcall(function()
+		return Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
+	end)
+	if ok and thumb then
+		Avatar.Image = thumb
+	end
+end)
+
+-- 头像右侧: 昵称(上,粗体亮色) + 用户名(下,小号灰色), 与头像区分
+local nickLabel = trackInstance(Instance.new("TextLabel"))
+nickLabel.Size = UDim2.fromOffset(66, 16)
+nickLabel.Position = UDim2.new(0, 46, 1, -41)
+nickLabel.BackgroundTransparency = 1
+nickLabel.Text = LocalPlayer.DisplayName
+nickLabel.TextColor3 = Theme.Text
+nickLabel.Font = FontBold
+nickLabel.TextSize = 13
+nickLabel.TextXAlignment = Enum.TextXAlignment.Left
+nickLabel.TextTruncate = Enum.TextTruncate.AtEnd
+nickLabel.ZIndex = 30
+nickLabel.Parent = Sidebar
+
+local userLabel = trackInstance(Instance.new("TextLabel"))
+userLabel.Size = UDim2.fromOffset(66, 14)
+userLabel.Position = UDim2.new(0, 46, 1, -25)
+userLabel.BackgroundTransparency = 1
+userLabel.Text = "@" .. LocalPlayer.Name
+userLabel.TextColor3 = Theme.SubText
+userLabel.Font = FontMain
+userLabel.TextSize = 11
+userLabel.TextXAlignment = Enum.TextXAlignment.Left
+userLabel.TextTruncate = Enum.TextTruncate.AtEnd
+userLabel.ZIndex = 30
+userLabel.Parent = Sidebar
 
 local tabLayout = trackInstance(Instance.new("UIListLayout"))
 tabLayout.FillDirection = Enum.FillDirection.Vertical
@@ -1208,6 +1269,7 @@ local function makeToggle(parent, text, callback, height, configKey)
 	if configKey then
 		ConfigControls[#ConfigControls + 1] = {
 			key = configKey,
+			kind = "toggle",
 			get = function() return State[configKey] end,
 			apply = function(v) set(v) end,
 		}
@@ -1357,6 +1419,7 @@ local function makeSlider(parent, text, min, max, default, suffix, callback, con
 	if configKey then
 		ConfigControls[#ConfigControls + 1] = {
 			key = configKey,
+			kind = "slider",
 			get = function() return State[configKey] end,
 			apply = function(v) setValue(v) end,
 		}
@@ -2992,7 +3055,9 @@ local function updateSpin(dt)
 	-- 跳跃检测: Humanoid.Jump (手机跳跃按钮) 或 空格键 (PC)
 	local wantJump = (myHum and myHum.Jump) or UserInputService:IsKeyDown(Enum.KeyCode.Space)
 	if wantJump and onGround and spinYVelocity <= 0 then
-		spinYVelocity = JUMP_POWER
+		-- 跳跃高度: 按具体跳跃高度换算倍率 (基准=7.2)
+		local jm = State.jumpEnabled and math.max(math.max(State.jumpHeight or 7.2, 7.2) / 7.2, 1) or 1
+		spinYVelocity = JUMP_POWER * jm
 	end
 
 	-- 重力
@@ -3291,6 +3356,146 @@ end)
 --========================================================
 -- 6. 构建标签页内容
 --========================================================
+-- 超高速跑者模块 (Runner): 平飞/反布娃娃/反挂机/自动训练/自动重生/自动胜利
+Runner = Runner or {}
+_GSEN_Runner = Runner
+do
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local VirtualUser = game:GetService("VirtualUser")
+	local levelConn, ragdollConn, afkThread, trainThread, rebThread, winThread = nil, nil, nil, nil, nil, nil
+	local lockedY = nil
+	local WIN_POSITION = Vector3.new(-5.63876893e-06, 3.5, -9076)
+	local function getChar() return LocalPlayer.Character end
+	local function getRoot() local c = getChar() return c and c:FindFirstChild("HumanoidRootPart") end
+	local function getHum() local c = getChar() return c and c:FindFirstChildOfClass("Humanoid") end
+	-- 平飞
+	function Runner.startLevelFly()
+		if levelConn then return end
+		local root = getRoot()
+		lockedY = root and root.Position.Y or 0
+		levelConn = RunService.Heartbeat:Connect(function()
+			if not State.runnerLevelFly then Runner.stopLevelFly(); return end
+			local root = getRoot()
+			if root then
+				if root.Position.Y < lockedY then
+					root.Position = Vector3.new(root.Position.X, lockedY, root.Position.Z)
+					root.Velocity = Vector3.new(root.Velocity.X, 0, root.Velocity.Z)
+				end
+				if root.Position.Y > lockedY then lockedY = root.Position.Y end
+			end
+		end)
+	end
+	function Runner.stopLevelFly()
+		if levelConn then levelConn:Disconnect(); levelConn = nil end
+		lockedY = nil
+	end
+	-- 反布娃娃
+	function Runner.setupAntiRagdoll()
+		if ragdollConn then ragdollConn:Disconnect(); ragdollConn = nil end
+		local hum = getHum()
+		if hum then
+			ragdollConn = hum.StateChanged:Connect(function(_, ns)
+				if State.runnerAntiRagdoll and ns == Enum.HumanoidStateType.Ragdoll then
+					hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				end
+			end)
+		end
+	end
+	function Runner.stopAntiRagdoll()
+		if ragdollConn then ragdollConn:Disconnect(); ragdollConn = nil end
+	end
+	-- 反挂机
+	function Runner.startAntiAFK()
+		if afkThread then return end
+		afkThread = task.spawn(function()
+			while State.runnerAntiAFK do
+				pcall(function()
+					VirtualUser:Button2Down(Vector2.new(0,0), Camera.CFrame)
+					task.wait(1)
+					VirtualUser:Button2Up(Vector2.new(0,0), Camera.CFrame)
+					task.wait(60)
+				end)
+			end
+		end)
+	end
+	function Runner.stopAntiAFK()
+		if afkThread then task.cancel(afkThread); afkThread = nil end
+	end
+	function Runner.toggleAntiAFK(v)
+		State.runnerAntiAFK = v
+		if v then Runner.startAntiAFK() else Runner.stopAntiAFK() end
+	end
+	-- 自动训练
+	local TRAIN_EXP = 999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999
+	local function getRemote(name)
+		local f = ReplicatedStorage:FindFirstChild("Remotes")
+		if not f then return nil end
+		return f:FindFirstChild(name)
+	end
+	function Runner.startAutoTrain()
+		if trainThread then return end
+		trainThread = task.spawn(function()
+			while State.runnerAutoTrain do
+				local r = getRemote("StepTaken")
+				if r then
+					pcall(function() r:FireServer(TRAIN_EXP, false) end)
+				end
+				task.wait(0.01)
+			end
+		end)
+	end
+	function Runner.stopAutoTrain()
+		if trainThread then task.cancel(trainThread); trainThread = nil end
+	end
+	function Runner.toggleAutoTrain(v)
+		State.runnerAutoTrain = v
+		if v then Runner.startAutoTrain() else Runner.stopAutoTrain() end
+	end
+	-- 自动重生
+	function Runner.startAutoRebirth()
+		if rebThread then return end
+		rebThread = task.spawn(function()
+			while State.runnerAutoRebirth do
+				local r = getRemote("RequestRebirth")
+				if r then
+					pcall(function() r:FireServer("free") end)
+				end
+				task.wait(1)
+			end
+		end)
+	end
+	function Runner.stopAutoRebirth()
+		if rebThread then task.cancel(rebThread); rebThread = nil end
+	end
+	function Runner.toggleAutoRebirth(v)
+		State.runnerAutoRebirth = v
+		if v then Runner.startAutoRebirth() else Runner.stopAutoRebirth() end
+	end
+	-- 自动胜利
+	function Runner.startAutoWin()
+		if winThread then return end
+		winThread = task.spawn(function()
+			while State.runnerAutoWin do
+				local root = getRoot()
+				if root then root.CFrame = CFrame.new(WIN_POSITION) end
+				task.wait(3)
+			end
+		end)
+	end
+	function Runner.stopAutoWin()
+		if winThread then task.cancel(winThread); winThread = nil end
+	end
+	function Runner.toggleAutoWin(v)
+		State.runnerAutoWin = v
+		if v then Runner.startAutoWin() else Runner.stopAutoWin() end
+	end
+	-- 重生重连
+	trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+		task.wait(0.6)
+		if State.runnerAntiRagdoll then pcall(Runner.setupAntiRagdoll) end
+	end))
+end
+
 -- 透视页
 do
 	local page = addTab("透视", "👁")
@@ -3317,6 +3522,48 @@ do
 		State.walkSpeed = v
 		if State.speedEnabled then applyWalkSpeed() end
 	end, "walkSpeed")
+	-- 跳跃高度 (独立开关, 滑块为具体跳跃高度数值)
+	local function jumpSetHeight(hum, v)
+		pcall(function() hum.JumpHeight = v end)
+		-- 兼容旧版 JumpPower 系统 (JumpHeight 与 JumpPower 联动)
+		pcall(function()
+			hum.JumpPower = math.max(1, math.sqrt(v * 2 * (workspace.Gravity or 196.2)))
+		end)
+	end
+	local function applyJumpHeight()
+		local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if not hum then return end
+		local v = State.jumpEnabled and math.max(State.jumpHeight or 7.2, 7.2) or 7.2
+		jumpSetHeight(hum, v)
+	end
+	local jumpSlider
+	makeToggle(page, "跳跃高度", function(v)
+		State.jumpEnabled = v
+		if v and (not State.jumpHeight or State.jumpHeight < 7.3) then
+			-- 防止旧配置/未设置时高度无效, 保证开启后有明显差异
+			State.jumpHeight = 7
+			if jumpSlider then jumpSlider.setValue(7) end
+		end
+		applyJumpHeight()
+	end, nil, "jumpEnabled")
+	jumpSlider = makeSlider(page, "跳跃高度", 1, 500, 7, "", function(v)
+		State.jumpHeight = v
+		applyJumpHeight()
+	end, "jumpHeight")
+	applyJumpHeight()
+	trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+		task.wait(0.5)
+		applyJumpHeight()
+	end))
+	-- 每帧强制保持跳跃高度, 防止游戏脚本或重生回写把 JumpHeight/JumpPower 覆盖回默认
+	trackConnection(RunService.RenderStepped:Connect(function()
+		local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+		if not hum then return end
+		local v = State.jumpEnabled and math.max(State.jumpHeight or 7.2, 7.2) or 7.2
+		if v > 7.5 then
+			jumpSetHeight(hum, v)
+		end
+	end))
 	makeSectionLabel(page, "飞行模式")
 	makeToggle(page, "飞行开关", function(v)
 		if v then
@@ -3335,6 +3582,32 @@ do
 	makeSlider(page, "自旋速度", 0.5, 100, 5, "", function(v) State.spinSpeed = v end, "spinSpeed")
 	makeSectionLabel(page, "无限跳")
 	makeToggle(page, "无限跳", function(v) State.infJumpEnabled = v end, nil, "infJumpEnabled")
+end
+
+-- 超高速跑者页
+do
+	local page = addTab("跑者", "👟")
+	makeSectionLabel(page, "平飞")
+	makeToggle(page, "平飞 (锁Y轴)", function(v)
+		State.runnerLevelFly = v
+		if v then Runner.startLevelFly() else Runner.stopLevelFly() end
+	end, nil, "runnerLevelFly")
+	makeSectionLabel(page, "防护")
+	makeToggle(page, "反布娃娃", function(v)
+		State.runnerAntiRagdoll = v
+		if v then Runner.setupAntiRagdoll() else Runner.stopAntiRagdoll() end
+	end, nil, "runnerAntiRagdoll")
+	makeSectionLabel(page, "训练")
+	makeToggle(page, "自动训练", function(v)
+		Runner.toggleAutoTrain(v)
+	end, nil, "runnerAutoTrain")
+	makeToggle(page, "自动重生", function(v)
+		Runner.toggleAutoRebirth(v)
+	end, nil, "runnerAutoRebirth")
+	makeSectionLabel(page, "自动胜利")
+	makeToggle(page, "自动胜利", function(v)
+		Runner.toggleAutoWin(v)
+	end, nil, "runnerAutoWin")
 end
 
 --========================================================
@@ -3366,6 +3639,108 @@ end
 --========================================================
 do
 	local page = addTab("传送", "↗")
+	-- 坐标传送 (置顶: 传送页第一个小标题)
+	local function makeTextInput(parent, text, default, placeholder, callback)
+		local container = trackInstance(Instance.new("Frame"))
+		container.Size = UDim2.new(1, -5, 0, 36)
+		container.BackgroundColor3 = Theme.Element
+		container.BorderSizePixel = 0
+		local cc = trackInstance(Instance.new("UICorner"))
+		cc.CornerRadius = UDim.new(0, 6); cc.Parent = container
+		local label = trackInstance(Instance.new("TextLabel"))
+		label.Size = UDim2.new(1, -120, 1, 0)
+		label.Position = UDim2.fromOffset(12, 0)
+		label.BackgroundTransparency = 1
+		label.Text = text; label.TextColor3 = Theme.Text
+		label.Font = FontMain; label.TextSize = 13
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = container
+		local box = trackInstance(Instance.new("TextBox"))
+		box.Size = UDim2.new(0, 100, 0, 22)
+		box.Position = UDim2.new(1, -112, 0.5, -11)
+		box.BackgroundColor3 = Theme.Background
+		box.TextColor3 = Theme.Accent
+		box.Font = FontMain; box.TextSize = 13
+		box.PlaceholderText = placeholder or ""
+		box.Text = default or ""
+		box.ClearTextOnFocus = false
+		box.TextXAlignment = Enum.TextXAlignment.Center
+		local bc = trackInstance(Instance.new("UICorner"))
+		bc.CornerRadius = UDim.new(0, 4); bc.Parent = box
+		box.Parent = container
+		trackConnection(box.FocusLost:Connect(function(enter)
+			if callback then task.spawn(callback, box.Text, enter) end
+		end))
+		container.Parent = parent
+		return {container = container, box = box}
+	end
+	makeSectionLabel(page, "坐标传送")
+	local ctX = makeTextInput(page, "X", "0", "0", function() end)
+	local ctY = makeTextInput(page, "Y", "0", "0", function() end)
+	local ctZ = makeTextInput(page, "Z", "0", "0", function() end)
+	makeButton(page, "填入当前位置", function()
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then showToast("无法获取角色") return end
+		local p = root.Position
+		ctX.box.Text = string.format("%.0f", p.X)
+		ctY.box.Text = string.format("%.0f", p.Y)
+		ctZ.box.Text = string.format("%.0f", p.Z)
+		showToast("已填入当前坐标")
+	end)
+	makeButton(page, "传送", function()
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then showToast("无法获取角色") return end
+		local x = tonumber(ctX.box.Text) or 0
+		local y = tonumber(ctY.box.Text) or 0
+		local z = tonumber(ctZ.box.Text) or 0
+		pcall(function() root.CFrame = CFrame.new(x, y, z) end)
+		showToast(string.format("传送至 %d, %d, %d", x, y, z))
+	end)
+	-- 保存坐标 / 选择坐标加载
+	local posHttp = game:GetService("HttpService")
+	local posFile = CONFIG_DIR .. "/savedPositions.json"
+	local savedPos = {}
+	local function readSavedPos()
+		local c = safeReadFile(posFile)
+		if not c then return {} end
+		local ok, d = pcall(function() return posHttp:JSONDecode(c) end)
+		return (ok and type(d) == "table") and d or {}
+	end
+	local function writeSavedPos()
+		pcall(function() safeWriteFile(posFile, posHttp:JSONEncode(savedPos)) end)
+	end
+	local function savedPosNames()
+		local list = {}
+		for k in pairs(savedPos) do table.insert(list, k) end
+		table.sort(list)
+		if #list == 0 then list = { "(无已存坐标)" } end
+		return list
+	end
+	savedPos = readSavedPos()
+	local posNameInput = makeTextInput(page, "坐标名称", "", "例如: 山顶", function() end)
+	makeButton(page, "保存当前坐标", function()
+		local char = LocalPlayer.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then showToast("无法获取角色") return end
+		local name = (posNameInput.box.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+		if name == "" then name = "位置" .. (#savedPos + 1) end
+		local p = root.Position
+		savedPos[name] = { X = p.X, Y = p.Y, Z = p.Z }
+		writeSavedPos()
+		if posDropdown then posDropdown.refresh(savedPosNames()) end
+		showToast("已保存坐标: " .. name)
+	end)
+	local posDropdown = makeDropdown(page, "选择坐标", savedPosNames(), "(选择坐标)", function(name)
+		if name == "(无已存坐标)" then return end
+		local pos = savedPos[name]
+		if not pos then return end
+		ctX.box.Text = string.format("%.0f", pos.X)
+		ctY.box.Text = string.format("%.0f", pos.Y)
+		ctZ.box.Text = string.format("%.0f", pos.Z)
+		showToast("已加载坐标: " .. name)
+	end)
 	makeSectionLabel(page, "传送 / 甩飞")
 	local teleportTarget = nil
 	local function getPlayerList()
@@ -5024,9 +5399,11 @@ local function loadConfig(name)
 	if not ok2 or type(config) ~= "table" then
 		return false, "配置解析失败"
 	end
-	-- 先关闭所有已注册的开关 (避免叠加)
+	-- 先关闭所有已注册的开关 (避免叠加), 滑块不动以免把倍率/数值归零
 	for _, ctrl in ipairs(ConfigControls) do
-		pcall(ctrl.apply, false)
+		if ctrl.kind ~= "slider" then
+			pcall(ctrl.apply, false)
+		end
 	end
 	-- 短暂等待让关闭逻辑完成
 	task.wait(0.1)
@@ -5040,6 +5417,19 @@ local function loadConfig(name)
 		end
 	end
 	return true, applied
+end
+
+-- 自动加载配置的持久化 (保存/读取所选配置名)
+local function saveAutoSelection(name)
+	local ok, json = pcall(function() return HttpService:JSONEncode({ name = name or "" }) end)
+	if ok and json then safeWriteFile(AUTO_CFG_FILE, json) end
+end
+local function readAutoSelection()
+	local content = safeReadFile(AUTO_CFG_FILE)
+	if not content then return nil end
+	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
+	if ok and type(cfg) == "table" and type(cfg.name) == "string" and cfg.name ~= "" then return cfg.name end
+	return nil
 end
 
 -- 删除指定名称的配置
@@ -5098,7 +5488,13 @@ do
 		State.animMode = savedMode
 	end
 	local page = addTab("设置", "⚙")
-	makeButton(page, "关于", function()
+	-- 反挂机 (从超高速跑者模块移入设置页)
+	makeSectionLabel(page, "防挂机")
+	makeToggle(page, "反挂机", function(v)
+		Runner.toggleAntiAFK(v)
+	end, nil, "runnerAntiAFK")
+	-- 抽成可复用: 设置页按钮与头像点击共用
+	openAbout = function()
 		-- 如果已存在则先销毁
 		if MainGui:FindFirstChild("AboutPanel") then
 			MainGui.AboutPanel:Destroy()
@@ -5106,8 +5502,8 @@ do
 
 		local aboutPanel = trackInstance(Instance.new("Frame"))
 		aboutPanel.Name = "AboutPanel"
-		aboutPanel.Size = UDim2.fromOffset(200, 180)
-		aboutPanel.Position = UDim2.new(0.5, -100, 0.5, -90)
+		aboutPanel.Size = UDim2.fromOffset(260, 320)
+		aboutPanel.Position = UDim2.new(0.5, -130, 0.5, -160)
 		aboutPanel.BackgroundColor3 = Theme.Window
 		aboutPanel.BorderSizePixel = 0
 		aboutPanel.Active = true
@@ -5182,7 +5578,7 @@ do
 		aboutScroll.ScrollBarThickness = 4
 		aboutScroll.ScrollBarImageColor3 = Theme.Stroke
 		aboutScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-		aboutScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		aboutScroll.ClipsDescendants = true
 		aboutScroll.Parent = aboutPanel
 
 		local aboutContent = trackInstance(Instance.new("Frame"))
@@ -5309,7 +5705,7 @@ do
 				)
 			end
 		end))
-	end)
+	end
 
 	makeSectionLabel(page, "展开动画")
 	local animDropdown = makeDropdown(page, "动画风格", {"碎片", "平滑"}, State.animMode, function(opt)
@@ -5455,6 +5851,28 @@ do
 		selectedConfig = opt
 	end)
 	selectedConfig = nil
+	local function buildAutoOpts()
+		local names = scanConfigs()
+		local opts = {"(关闭)"}
+		for i = 1, #names do opts[#opts + 1] = names[i] end
+		return opts
+	end
+	local autoOpts = buildAutoOpts()
+	local autoCurrent = readAutoSelection() or "(关闭)"
+	local autoDropdown = makeDropdown(page, "自动加载配置", autoOpts, autoCurrent, function(opt)
+		if opt == "(关闭)" then
+			saveAutoSelection("")
+			showToast("已关闭自动加载配置")
+		else
+			saveAutoSelection(opt)
+			showToast("下次执行将自动加载配置: " .. opt)
+		end
+	end)
+	local function refreshAutoDropdown()
+		autoDropdown.refresh(buildAutoOpts())
+		local cur = readAutoSelection()
+		autoDropdown.valLbl.Text = (cur and cur ~= "") and cur or "(关闭)"
+	end
 
 	-- 刷新列表按钮
 	makeButton(page, "刷新配置列表", function()
@@ -5468,6 +5886,7 @@ do
 			showToast("配置列表已刷新\n共 " .. #newList .. " 个配置")
 		end
 		selectedConfig = nil
+		refreshAutoDropdown()
 	end)
 
 	-- 加载配置按钮
@@ -5503,6 +5922,10 @@ do
 					configDropdown.valLbl.Text = "(选择配置)"
 				end
 				selectedConfig = nil
+				if (readAutoSelection() or "") == configName then
+					saveAutoSelection("")
+				end
+				refreshAutoDropdown()
 			else
 				showToast("✗ 删除失败\n" .. tostring(err))
 			end
@@ -5719,6 +6142,8 @@ local function unwatchContainers()for container,connection in pairs(Storage.cont
 local function updateTracking()if trackingEnabled()then State.sweepAccumulator=math.huge;watchContainers()requestRefresh()else unwatchContainers()clearRegistry()end end
 
 local StatsLabel
+local autoHopClock=0
+local autoHopCooldownUntil=0
 Connections.espConn=trackConnection(Services.RunService.Heartbeat:Connect(function(deltaTime)if State.statsDirty and StatsLabel then State.statsDirty=false;StatsLabel.Text=string.format("追踪: %d  |  显示: %d",State.registryCount,State.espCount)end;if not trackingEnabled()then return end;local now=os.clock();for inst,expiry in pairs(Storage.candidates)do if not inst.Parent then Storage.candidates[inst]=nil elseif isCrystal(inst)then Storage.candidates[inst]=nil;trackCrystal(inst)elseif now>expiry then Storage.candidates[inst]=nil end end;local deadline=now+ESP.budget;if next(Storage.dirty)~=nil then for inst in pairs(Storage.dirty)do local ok,err=pcall(syncCrystal,inst)if not ok then Storage.dirty[inst]=nil;reportError("同步",err)end;if os.clock()>deadline then break end end end;State.sweepAccumulator+=deltaTime;if State.sweepAccumulator>=ESP.sweep then State.sweepAccumulator=0;local ok,err=pcall(function()watchContainers()sweep()end)if not ok then reportError("扫描",err)end end;State.distanceAccumulator+=deltaTime;if State.distanceAccumulator>=PACE.distance then State.distanceAccumulator=0;local ok,err=pcall(updateDistances)if not ok then reportError("距离",err)end end end))
 
 -- 玩家ESP
@@ -5916,7 +6341,12 @@ local tierKeys={"tier1","tier2","tier3","tier4","tier5","tier6","tier7","tier8",
 for i=1,#TIER_NAMES do local tier=i;local t=makeToggle(page, TIER_NAMES[tier], function(value) KS_Config[tierKeys[tier]]=value; State.tierFilter[tier]=value;requestRefresh()end)t.set(true)ksRegToggle(tierKeys[tier],t,true,function(v) State.tierFilter[tier]=v;requestRefresh()end)end
 makeSectionLabel(page, "最小价值会隐藏并跳过低于此价值的水晶。支持单位: k/m/b/t (如 500k, 2m, 1.5b)。留空显示全部")
 local function setMinValue(text)local parsed=parseValue(text)if not parsed then return end;State.minValue=math.max(parsed,0)State.valueFilter=State.minValue>0;requestRefresh()end
-makeTextInput(page, "最小价值", Config.MinCrystalValue, "2m", setMinValue)
+local minValueInput = makeTextInput(page, "最小价值", Config.MinCrystalValue, "2m", setMinValue)
+ConfigControls[#ConfigControls + 1] = {
+	key = "ks_minValue",
+	get = function() return minValueInput.box.Text end,
+	apply = function(v) minValueInput.box.Text = tostring(v or "") setMinValue(tostring(v or "")) end,
+}
 makeSectionLabel(page, "最小重量会隐藏并跳过低于此重量的水晶。支持单位: k/m/b/t (如 5k=5000, 1.5m=1500000)。留空显示全部")
 local minWeightInput
 local function setMinWeight(text)local parsed=parseValue(text)if not parsed then State.minWeight=0;State.weightFilter=false;if minWeightInput then minWeightInput.box.Text="" end;requestRefresh()return end;State.minWeight=math.max(parsed,0)State.weightFilter=State.minWeight>0;requestRefresh()end
@@ -6022,7 +6452,7 @@ do
  local function beginLoot(finish)pendingFinish=finish==true;lootUntil=os.clock()+LOOT_TIME;phase="loot";statusText="正在拾取符文"end
  local function stop()active=false;phase="idle";target=nil;anchor=nil;waitUntil=0;Move.glideStop()hpMark=nil;dryRounds=0;pendingFinish=false;lootUntil=0;spotFrame=nil;aimTurn=0;blindClock=0;lostClock=0;dryClock=0;probeIndex=0;scanRetries=0;stuckClock=0;lastPos=nil;lastDamageClock=0;lockedCenter=nil;spotCenter=nil;centerClock=0;spotClock=0;table.clear(blacklistedBoulders)statusText="空闲";Move.setFly(toggleValue("Fly"))Move.setNoclip(toggleValue("Noclip"))Mountain.setAutoGrab(toggleValue("AutoRunePickup"))end
  local function step(deltaTime)local root=getRoot()if not root then statusText="等待角色...";return end;local now=os.clock()local travelling=spotFrame~=nil and(root.Position-spotFrame.Position).Magnitude>ARRIVE_DIST;if travelling and lastPos and(root.Position-lastPos).Magnitude<0.5 then stuckClock+=deltaTime;if stuckClock>=STUCK_TIME then stuckClock=0;spotFrame=nil;aimTurn=(aimTurn+1)%#AIM_ANGLES;probeIndex+=1 end else stuckClock=0;lastPos=root.Position end;if phase=="scan"then if not scanned then if scanIndex==0 then scanIndex=1;waitUntil=now+SCAN_HOLD end;if scanIndex<=#SCAN_SPOTS then hold(SCAN_SPOTS[scanIndex])statusText=string.format("扫描中 %d/%d",scanIndex,#SCAN_SPOTS)if now>=waitUntil then scanIndex+=1;waitUntil=now+SCAN_HOLD end;return end;scanned=true end;local model=pickTarget()if not model then scanRetries+=1;if scanRetries<=3 then statusText="等待巨石...";waitUntil=now+1.5;return end;scanRetries=0;beginLoot(true)statusText="最终符文扫描";return end;scanRetries=0;target=model;anchor=visibleAnchor(model)or anchorOf(model)spotFrame=nil;spotCenter=nil;lockedCenter=nil;centerClock=0;spotClock=0;aimTurn=0;blindClock=0;lostClock=0;dryClock=0;probeIndex=0;hpMark=nil;dryRounds=0;lastDamageClock=now;phase="mine";return end;if phase=="mine"then if not target or not target.Parent then lastSpot=root.CFrame;beginLoot(false)return end;local kind=boulderKind(target)or"巨石";local hp=boulderHealth(target)if hp and hp<=0 then lastSpot=root.CFrame;beginLoot(false)return end;if not anchor or not anchor.Parent or not anchor:IsDescendantOf(target)then anchor=visibleAnchor(target)or anchorOf(target)end;centerClock+=deltaTime;local center=lockedCenter;if not center or centerClock>=CENTER_STEP then centerClock=0;local fresh=coreSpot(target)or anchorSpot(target,anchor)if fresh and(not center or(fresh-center).Magnitude>=CENTER_SHIFT)then center=fresh;lockedCenter=fresh end end;if not center then lostClock+=deltaTime;if lostClock>=LOST_GRACE then lastSpot=root.CFrame;beginLoot(false)return end;statusText=string.format("保持 %s",kind)return end;lostClock=0;spotClock+=deltaTime;if spotFrame and spotCenter and(spotCenter-center).Magnitude>SPOT_SLACK then spotFrame=nil end;if not spotFrame then spotFrame=approach(anchor,target,aimTurn,center,PROBE_DIST[probeIndex%#PROBE_DIST+1])spotCenter=center;spotClock=0 end;if spotFrame then Move.setNoclip(true)hold(spotFrame,center)end;if heldPick==nil or heldPick.Parent~=LocalPlayer.Character then equipClock=0;heldPick=equipPick()else equipClock+=deltaTime;if equipClock>=EQUIP_STEP then equipClock=0;heldPick=equipPick()or heldPick end end;if not heldPick then statusText="装备镐子中...";return end;swingClock+=deltaTime;local gap=swingGap()local swung=0;if swingClock>=gap then swung=math.min(math.floor(swingClock/gap),4)swingClock-=swung*gap;for _=1,swung do swing(anchor,target,center)end end;if hp then if hpMark==nil or hp<(hpMark-0.001)then hpMark=hp;dryRounds=0;dryClock=0;blindClock=0;lastDamageClock=now else dryClock+=deltaTime;dryRounds+=swung;if dryClock>=DRY_SWAP then dryClock=0;dryRounds=0;anchor=freshAnchor(target)or visibleAnchor(target)or anchor;if spotClock>=SPOT_HOLD then aimTurn=(aimTurn+1)%#AIM_ANGLES;probeIndex+=1;spotFrame=nil end end end;if now-lastDamageClock>=SKIP_TIME then blacklistedBoulders[target]=now+15;target=nil;anchor=nil;spotFrame=nil;phase="scan";statusText="跳过无法击中的巨石";return end;statusText=string.format("挖掘 %s  %.0f 血量",kind,hp)return end;if sightClear(root.Position,anchor,target)then blindClock=0 else blindClock+=deltaTime;if blindClock>=SIGHT_GRACE then blindClock=0;anchor=visibleAnchor(target)or anchor;if spotClock>=SPOT_HOLD then aimTurn=(aimTurn+1)%#AIM_ANGLES;spotFrame=nil end end end;statusText=string.format("挖掘 %s",kind)return end;if phase=="loot"then if lastSpot then hold(lastSpot)end;Mountain.grabNear(RUNE_SWEEP)if now<lootUntil then statusText=string.format("拾取符文中  %.1fs",lootUntil-now)return end;if pendingFinish then phase="reset";waitUntil=now+RESET_WAIT;statusText="符文已收集"else target=nil;anchor=nil;phase="scan";statusText="下一个巨石"end;return end;if phase=="reset"then if now<waitUntil then return end;if autoRejoin then statusText="正在重启服务器";showToast("没有更多巨石 - 重新加入中")stop()restart()else statusText="重新扫描山脉...";showToast("没有更多巨石 - 4秒后重新扫描")target=nil;anchor=nil;scanned=false;scanIndex=0;phase="scan";waitUntil=now+4.0 end end end
- local function setActive(value)if not value then stop()return end;if not next(targets)then showToast("请选择至少一个巨石")if KS_ToggleHandles.AutoFarmBoulders then KS_ToggleHandles.AutoFarmBoulders.set(false)end;return end;active=true;phase="scan";waitUntil=0;target=nil;anchor=nil;lastSpot=nil;swingClock=0;equipClock=0;hpMark=nil;dryRounds=0;spotFrame=nil;aimTurn=0;blindClock=0;lostClock=0;dryClock=0;probeIndex=0;scanned=false;scanIndex=0;heldPick=nil;pendingFinish=false;lootUntil=0;scanRetries=0;stuckClock=0;lastPos=nil;lockedCenter=nil;spotCenter=nil;centerClock=0;spotClock=0;statusText="启动中";Move.setFly(false)Move.setNoclip(true)Mountain.setAutoGrab(true)end
+ local function setActive(value)if not value then stop();KS_Config.autoFarmBoulders=false;return end;if not next(targets)then showToast("请选择至少一个巨石")if KS_ToggleHandles.AutoFarmBoulders then KS_ToggleHandles.AutoFarmBoulders.set(false)end;return end;KS_Config.autoFarmBoulders=true;active=true;phase="scan";waitUntil=0;target=nil;anchor=nil;lastSpot=nil;swingClock=0;equipClock=0;hpMark=nil;dryRounds=0;spotFrame=nil;aimTurn=0;blindClock=0;lostClock=0;dryClock=0;probeIndex=0;scanned=false;scanIndex=0;heldPick=nil;pendingFinish=false;lootUntil=0;scanRetries=0;stuckClock=0;lastPos=nil;lockedCenter=nil;spotCenter=nil;centerClock=0;spotClock=0;statusText="启动中";Move.setFly(false)Move.setNoclip(true)Mountain.setAutoGrab(true)end
  -- 巨石农场 UI (使用 GSENAux 辅助函数)
  makeSectionLabel(page, "巨石农场 - 目标 (选择要挖的巨石类型)")
  local boulderKeys={"boulderMossite","boulderVoltite","boulderGildrite","boulderRimeveil","boulderNocturnite"}
@@ -6073,7 +6503,7 @@ do
  local function stop()active=false;target=nil;columnY=nil;loaded=false;Move.glideStop()scanIndex=0;loot=nil;lootHp=nil;lootMax=nil;lootBlocked=false;lootStartTime=0;lootLastHpChange=0;lootHpMark=nil;table.clear(blacklistedLoot)table.clear(blacklistedColumns)sellPhase="idle";sellReturnCFrame=nil;sellPhaseClock=0;plantPhase="idle";plantPhaseClock=0;plantReturnCFrame=nil;heldPick=nil;statusText="空闲";Move.setFly(toggleValue("Fly"))Move.setNoclip(toggleValue("Noclip"))Mountain.setAutoGrab(toggleValue("AutoRunePickup"))end
  local function crystalHealth(inst)if not inst then return nil end;local hp=getAttr(inst,"MinedHP")or getAttr(inst,"Health")or getAttr(inst,"Hp")or getAttr(inst,"CurrentHealth")return tonumber(hp)end
  local function step(deltaTime)local root=getRoot()if not root then statusText="等待角色...";return end;local now=os.clock()if plantPhase~="idle"then if plantPhase=="travel"then statusText="前往地块...";holdAt(plantPlotPos)if(root.Position-plantPlotPos.Position).Magnitude<10 or(now-plantPhaseClock>12)then plantPhase="do_plant";plantPhaseClock=now end;return end;if plantPhase=="do_plant"then statusText="种植幸运水晶...";holdAt(plantPlotPos)if now-plantPhaseClock>=0.15 then plantPhaseClock=now;if plantIndex<=#plantTools then local tool=plantTools[plantIndex]local col=(plantIndex-1)%6;local row=math.floor((plantIndex-1)/6)local plantSpot=plantGroundPos+Vector3.new(col*4-10,0,row*4-10)pcall(function()Remotes.PlotPlaceRequest:FireServer(tool.Name,plantSpot,0,tool)end)plantIndex+=1 else plantPhase="return";plantPhaseClock=now end end;return end;if plantPhase=="return"then statusText="返回山脉...";local destination=plantReturnCFrame or mountainSpot()holdAt(destination)if(root.Position-destination.Position).Magnitude<12 or(now-plantPhaseClock>12)then plantPhase="idle";plantReturnCFrame=nil;target=nil;columnY=nil;surfaceClock=0 end;return end end;if autoPlantLuck and plantPhase=="idle"and now-plantClock>=2.0 then plantClock=now;local tools=getLuckToolsInBackpack()if#tools>=5 then local pos=getPlotPlantPosition()if pos then plantGroundPos=pos;plantPlotPos=CFrame.new(pos+Vector3.new(0,8,0),pos)plantReturnCFrame=root.CFrame;plantTools=tools;plantIndex=1;plantPhase="travel";plantPhaseClock=now;statusText="前往地块...";return end end end;if not loaded then if scanIndex==0 then scanIndex=1;scanUntil=now+SCAN_HOLD end;if scanIndex<=#SCAN_SPOTS then holdAt(SCAN_SPOTS[scanIndex])statusText=string.format("加载地形 %d/%d",scanIndex,#SCAN_SPOTS)if now>=scanUntil then scanIndex+=1;scanUntil=now+SCAN_HOLD end;return end;loaded=true;peakClock=0 end;if sellPhase~="idle"then local sellCFrame=getSellCFrame()if sellPhase=="travel"then statusText="前往出售站...";holdAt(sellCFrame)if(root.Position-sellCFrame.Position).Magnitude<10 or(now-sellPhaseClock>12)then sellPhase="do_sell";sellPhaseClock=now end;return end;if sellPhase=="do_sell"then statusText="出售水晶...";holdAt(sellCFrame)if now-sellPhaseClock>=0.3 and now-sellPhaseClock<0.6 then unfavoriteAll()fireRemote(Remotes.SellRequest,"all")local things=Services.Workspace:FindFirstChild("Things")local prox=things and things:FindFirstChild("SellProx")local prompt=prox and prox:FindFirstChildOfClass("ProximityPrompt")if prompt then firePrompt(prompt)end end;if(now-sellPhaseClock>=1.5)or(backpackWeight()<=0)then lootBlocked=false;sellPhase="return";sellPhaseClock=now end;return end;if sellPhase=="return"then statusText="返回山脉...";local destination=sellReturnCFrame or mountainSpot()holdAt(destination)if(root.Position-destination.Position).Magnitude<12 or(now-sellPhaseClock>12)then sellPhase="idle";sellReturnCFrame=nil;target=nil;columnY=nil;surfaceClock=0 end;return end end;if autoSell and sellPhase=="idle"and(bagRatio()>=SELL_MARK or lootBlocked)then sellReturnCFrame=root.CFrame;sellPhase="travel";sellPhaseClock=now;statusText="前往出售站...";return end;if focusLuck then pickupStep(function(inst)local luckPts=math.floor(crystalLuck(inst)*100+0.5)return luckPts>=minLuckPoints end)else pickupStep()end;if heldPick==nil or heldPick.Parent~=LocalPlayer.Character then equipClock=0;heldPick=Farm.equipPick()else equipClock+=deltaTime;if equipClock>=EQUIP_STEP then equipClock=0;heldPick=Farm.equipPick()or heldPick end end;if not heldPick then statusText="装备镐子中...";return end;swingClock+=deltaTime;local swingNeed=math.max(0.02,Farm.swingGap(heldPick)*0.4)local canSwing=swingClock>=swingNeed;local free=backpackFree()if loot then local parented=loot.Parent~=nil;local collected=(getAttr(loot,"Collected")==true)local currentHp=crystalHealth(loot)if currentHp and currentHp>0 then if lootHpMark==nil or currentHp<(lootHpMark-0.001)then lootHpMark=currentHp;lootLastHpChange=now end end;local hpStuck=(now-lootLastHpChange>12.0)and(now-lootStartTime>12.0)local maxTimeout=(now-lootStartTime>40.0)local cantFit=(crystalWeight(loot)>free)if not parented or collected or hpStuck or maxTimeout or cantFit then if(hpStuck or maxTimeout)and loot and parented then blacklistedLoot[loot]=now+20 end;loot=nil;lootHp=nil;lootMax=nil;lootHpMark=nil end end;if loot then local hp=crystalHealth(loot)if hp and(lootMax==nil or hp>lootMax)then lootMax=hp end;lootHp=hp end;if not loot and now-lootClock>=COLLECT_GAP then lootClock=now;loot,lootBlocked=findLoot(free,root.Position)if loot then lootStartTime=now;lootLastHpChange=now;lootHp=crystalHealth(loot)lootMax=lootHp;lootHpMark=lootHp end end;if loot and loot.Parent then local spot=loot.Position;holdAt(CFrame.new(spot+Vector3.new(0,COLLECT_LIFT,0),spot),spot)requestStream(spot)if canSwing then swingClock-=swingNeed;swing(spot)end;if now-grabClock>=GRAB_GAP then grabClock=now;grabCrystal(loot,crystalPrompt(loot))end;if lootHp and lootHp>0 then local ratio=0;if lootMax and lootMax>0 then ratio=math.clamp(1-lootHp/lootMax,0,1)end;statusText=string.format("挖掘 %s (%s) %d%%",crystalName(loot),formatShort(crystalValue(loot),"$"),math.floor(ratio*100))else statusText=string.format("收集 %s (%s)...",crystalName(loot),formatShort(crystalValue(loot),"$"))end;return end;local origin=farmOrigin(root)if target and now-surfaceClock>=SURFACE_GAP then surfaceClock=now;local spot=surfaceAt(target.X,target.Z)if not spot then target=nil;columnY=nil;columnDry=0;columnSwings=0 else if not columnY or spot.Y<columnY-0.05 then columnDry=0 else columnDry+=columnSwings end;columnSwings=0;columnY=spot.Y;target=spot;if columnDry>=COLUMN_DRY then blacklistedColumns[gridKey(target.X,target.Z)]=now+20;target=nil;columnY=nil;columnDry=0 end end end;if not target then local spot=pickTarget(origin,now)if not spot then spot=surfaceAt(origin.X,origin.Z)end;if not spot then requestStream(origin)if canSwing then swingClock-=swingNeed;swing(root.Position-Vector3.new(0,DIG_REACH*0.5,0))end;statusText="加载地形";return end;target=spot;columnY=spot.Y;columnDry=0;columnSwings=0;surfaceClock=now end;holdAt(CFrame.new(target+Vector3.new(0,DIG_LIFT,0),target),target)if canSwing then swingClock-=swingNeed;columnSwings+=1;swing(target)end;statusText=string.format("挖掘表面 %dm",math.floor(target.Y))end
- local function setActive(value)if not value then stop()return end;active=true;target=nil;columnY=nil;columnDry=0;columnSwings=0;surfaceClock=0;peakClock=0;scanIndex=0;scanUntil=0;loaded=false;loot=nil;lootClock=0;lootHp=nil;lootMax=nil;lootBlocked=false;lootStartTime=0;table.clear(blacklistedLoot)table.clear(blacklistedColumns)swingClock=0;equipClock=0;sellSpot=nil;sellUntil=0;heldPick=nil;statusText="启动中";Move.setFly(false)Move.setNoclip(true)Mountain.setAutoGrab(true)end
+ local function setActive(value)if not value then stop();KS_Config.moneyFarmActive=false;return end;KS_Config.moneyFarmActive=true;active=true;target=nil;columnY=nil;columnDry=0;columnSwings=0;surfaceClock=0;peakClock=0;scanIndex=0;scanUntil=0;loaded=false;loot=nil;lootClock=0;lootHp=nil;lootMax=nil;lootBlocked=false;lootStartTime=0;table.clear(blacklistedLoot)table.clear(blacklistedColumns)swingClock=0;equipClock=0;sellSpot=nil;sellUntil=0;heldPick=nil;statusText="启动中";Move.setFly(false)Move.setNoclip(true)Mountain.setAutoGrab(true)end
  -- 金钱农场 UI
  makeSectionLabel(page, "金钱农场 - 水晶自动农场 (加载山脉并按价值或幸运点挖掘水晶)")
  local mfToggle=makeToggle(page, "自动农场", setActive)
@@ -6106,7 +6536,23 @@ end
 makeSectionLabel(page, "跳服")
 makeButton(page, "跳服 (随机切换服务器)", function() if not Net.busy() then if not Net.hop() then showToast("跳服启动失败") end else showToast("跳服进行中...") end end)
 makeButton(page, "重进当前服", function() Net.rejoin() end)
-end -- if isKaishanGame
+local autoHopToggle=makeToggle(page,"自动跳服 (无合格矿石自动切服)",function(value) State.autoHopNoOre=value;KS_Config.autoHopNoOre=value end)
+ksRegToggle("autoHopNoOre",autoHopToggle,false,function(v) State.autoHopNoOre=v end)
+	-- 自动跳服监控(独立循环,不依赖水晶ESP是否开启)
+	do
+		task.spawn(function()
+			while true do
+				task.wait(5)
+				pcall(function()
+					if not State.autoHopNoOre then return end
+					local qualify=0
+					eachContainer(function(container)for _,child in ipairs(container:GetChildren())do if isCrystal(child)and getAttr(child,"Collected")~=true and tierFilterOk(child)and meetsFilter(child)and meetsWeightFilter(child)and meetsLuckFilter(child)then qualify=qualify+1 end end end)
+					if qualify==0 then if Net.hop() then showToast("无合格矿石-自动跳服") end end
+				end)
+			end
+		end)
+	end
+	end -- if isKaishanGame
 
 -- 清理函数 (保留原脚本自管理卸载逻辑)
 local function cleanupAll()State.espActive=false;State.playerEspActive=false;State.aimTpEnabled=false;setSpeedBoost(false)finishTeleport()unwatchContainers()if Mountain.shutdown then Mountain.shutdown()end;if Move.shutdown then Move.shutdown()end;restoreInstantPrompts()table.clear(Storage.pendingActions)table.clear(Storage.promptRestores)table.clear(Storage.claimed)if Net.stop then Net.stop()end;for _,connection in ipairs(Storage.netConns)do if connection then connection:Disconnect()end end;table.clear(Storage.netConns)State.afkRunning=false;for _,connection in ipairs(Storage.afkConns)do if connection then connection:Disconnect()end end;table.clear(Storage.afkConns)if Farm and Farm.stop then Farm.stop()end;if Money and Money.stop then Money.stop()end;for key,connection in pairs(Connections)do if connection then connection:Disconnect()end end;table.clear(Connections)State.speedHooked=nil;clearRegistry()clearPlayerEsp()if EspHolder then EspHolder:Destroy()EspHolder=nil end;State.rootPart=nil;getgenv().UniverseLoaded=false;getgenv().UniverseUnload=nil end
@@ -6704,4 +7150,13 @@ end))
 -- 初始化
 CountLabel.Visible = false
 applyWalkSpeed()
-print("[GSEN辅助 V150] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方 | 幸运值多源解析 | 全品质过滤(9档) | 深度调试日志 | 删除配置二次确认弹窗 | 跳服移至开山页末尾 | initKaishan异常保护 | 聊天翻译支持Global频道 | Remotes文件夹查找缓存(其他游戏快速初始化) | UniverseId条件加载(非开采一座山跳过开山模块) | 幸运值=基础幸运×变异倍率(方法1-5全部乘变异倍率) | 修复金钱农场/巨石农场人物无法移动(滑翔AlignOrientation属性错误ReactionForceEnabled→ReactionTorqueEnabled) | 重复执行脚本时清理旧GUI(防旧实例残留导致修改不生效) | 删除重复拖拽缩放代码 | 右下角缩放把手:纯空心圆角正方形(UIStroke白色半透明1.2px描边,圆角6px,32×32) | 缩放把手正方形改为溢出窗口显示(handle挂到MainGui,不受Window.ClipsDescendants裁切,监听Window的Size/Position变化实时跟随窗口右下角) | 缩放把手可见性跟随悬浮窗(handle挂到MainGui后不受Window.Visible传播,监听GetPropertyChangedSignal事件隐藏菜单时正方形同步隐藏) | 修复V149版本号print字符串内嵌英文双引号导致的编译期语法错误(无报错但脚本全部不执行)")
+-- 启动时自动加载所选配置: 下次执行自动加载
+local autoLoadName = readAutoSelection()
+if autoLoadName and autoLoadName ~= "" then
+	task.spawn(function()
+		task.wait(0.5)
+		pcall(loadConfig, autoLoadName)
+		showToast("已自动加载配置: " .. autoLoadName)
+	end)
+end
+print("[GSEN辅助 V177] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方 | 幸运值多源解析 | 全品质过滤(9档) | 深度调试日志 | 删除配置二次确认弹窗 | 跳服移至开山页末尾 | initKaishan异常保护 | 聊天翻译支持Global频道 | Remotes文件夹查找缓存(其他游戏快速初始化) | UniverseId条件加载(非开采一座山跳过开山模块) | 幸运值=基础幸运×变异倍率(方法1-5全部乘变异倍率) | 修复金钱农场/巨石农场人物无法移动(滑翔AlignOrientation属性错误ReactionForceEnabled→ReactionTorqueEnabled) | 重复执行脚本时清理旧GUI(防旧实例残留导致修改不生效) | 删除重复拖拽缩放代码 | 右下角缩放把手:纯空心圆角正方形(UIStroke白色半透明1.2px描边,圆角6px,32×32) | 缩放把手正方形改为溢出窗口显示(handle挂到MainGui,不受Window.ClipsDescendants裁切,监听Window的Size/Position变化实时跟随窗口右下角) | 缩放把手可见性跟随悬浮窗(handle挂到MainGui后不受Window.Visible传播,监听GetPropertyChangedSignal事件隐藏菜单时正方形同步隐藏) | 修复V149版本号print字符串内嵌英文双引号导致的编译期语法错误(无报错但脚本全部不执行) | 标签栏滚动框垂直缩短:底部留出约50px) | 标签栏下方留白添加玩家头像(圆形带描边,靠左) | 头像右侧昵称在上/用户名在下(字号颜色区分) | 点击头像弹出关于弹窗(复用设置页关于) | 移除设置页关于按钮(入口移至头像点击) | 修复关于弹窗内容溢出(改为手动跟随内容高度的滚动框,面板加高可滚动查看全部) | 开山页新增自动跳服开关(重进当前服下方,ESP计数为0持续12秒自动随机切服,90秒冷却) | 自动跳服改为独立监控(不依赖水晶ESP,遍历水晶容器判定合格矿石,连续25秒无合格即切服,90秒冷却) | 自动跳服冷却改为20秒) | 去掉连续判定阈值(5秒扫一次,无合格矿石直接跳房,跳后20秒冷却) | 去掉跳房冷却(每5秒无合格矿石即跳房) | 设置页新增自动加载配置(下拉选择配置或关闭,下次脚本执行自动加载所选配置) | 修复最小价值未注册ConfigControls导致不被配置保存(补注册ks_minValue,与重量/幸运一致) | 修复金钱农场/巨石农场开关状态不被保存(setActive同步KS_Config.moneyFarmActive与KS_Config.autoFarmBoulders) | 传送页新增坐标传送(X/Y/Z输入,填入当前位置,传送按钮,瞬移HRP,坐标传送置顶于传送页第一个小标题,坐标传送下新增保存当前坐标与选择坐标加载(命名为savedPositions.json持久化,选择后自动填入X/Y/Z) | 跳跃高度改为独立开关控制(开关开启应用高度,关闭恢复默认7.2) | 修复跳高无效:此游戏为自旋锚定系统,跳跃由脚本JUMP_POWER手动控制,改为跳起初速度按jumpMult倍率倍增,开关关闭时倍率=1) | 跳跃高度滑块改为倍率显示(范围1-10倍,默认2=2倍跳高,明确可见;原默认7对应1倍故无感))")
