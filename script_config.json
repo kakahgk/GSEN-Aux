@@ -1,10 +1,10 @@
 [
 {
-"name":"GSEN脚本"
-"introduce":"一个开源的AI脚本，支持开采一座山、超高速跑者"
-"game":"通用、开采一座山、超高速跑者"
-"picture":"null"
-"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk/GSEN-Aux/main/GSEN.lua\"))()"
+"name":"GSEN脚本",
+"introduce":"一个开源的AI脚本，支持开采一座山、超高速跑者",
+"game":"通用、开采一座山、超高速跑者",
+"picture":"null",
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk/GSEN-Aux/main/GSEN.lua\"))()",
 }
 
 ]
