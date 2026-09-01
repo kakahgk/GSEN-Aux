@@ -14,5 +14,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk7/BW/main/BW\"))()"
 }
+,
+{
+"name":"IY指令脚本",
+"introduce":"一个成熟的指令执行脚本，包含大多数功能，所有服务器通用",
+"game":"通用",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://rawscripts.net/raw/Universal-Script-Infinite-Yield-FE-27010\"))()"
+}
 
 ]
