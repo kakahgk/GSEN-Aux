@@ -7,4 +7,12 @@
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk/GSEN-Aux/main/GSEN.lua\"))()"
 }
 
+{
+"name":"BW",
+"introduce":"一个多功能脚本，所有服务器通用",
+"game":"通用",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk/GSEN-Aux/main/GSEN.lua\"))()"
+}
+
 ]
