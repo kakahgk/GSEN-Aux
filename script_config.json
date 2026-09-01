@@ -12,7 +12,7 @@
 "introduce":"一个多功能脚本，所有服务器通用",
 "game":"通用",
 "picture":null,
-"link":"loadstring(game:HttpGet("https://raw.githubusercontent.com/kakahgk7/BW/main/BW"))()"
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/kakahgk7/BW/main/BW\"))()"
 }
 
 ]
