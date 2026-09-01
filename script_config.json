@@ -22,5 +22,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://rawscripts.net/raw/Universal-Script-Infinite-Yield-FE-27010\"))()"
 }
+,
+{
+"name":"皮脚本",
+"introduce":"大众皆知的著名脚本，内包含多个服务器",
+"game":"通用、驾驶帝国、自然灾害",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/xiaopi77/xiaopi77/main/QQ1002100032-Roblox-Pi-script.lua\"))()"
+}
 
 ]
