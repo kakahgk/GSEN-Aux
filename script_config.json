@@ -38,5 +38,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.giteeusercontent.com/BS_script/script/raw/master/BS_Script.Luau\"))()"
 }
+,
+{
+"name":"Linni Hub",
+"introduce":"霖溺脚本，支持多个服务器",
+"game":"通用、驾驶帝国",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/ShenJiaoBen/ScriptLoader/refs/heads/main/Linni_FreeLoader.lua\"))()"
+}
 
 ]
