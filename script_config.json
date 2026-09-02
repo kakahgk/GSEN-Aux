@@ -49,10 +49,10 @@
 ,
 {
 "name":"SimpleSPY汉化版",
-"introduce":"SSPY，一个成熟的",
+"introduce":"SSPY，一个成熟的数据抓取工具",
 "game":"通用",
 "picture":null,
-"link":"loadstring(game:HttpGet(\"https://pastefy.app/EVVdCgPf/raw"))()"
+"link":"loadstring(game:HttpGet(\"https://pastefy.app/EVVdCgPf/raw\"))()"
 }
 
 ]
