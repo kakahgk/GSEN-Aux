@@ -46,5 +46,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/ShenJiaoBen/ScriptLoader/refs/heads/main/Linni_FreeLoader.lua\"))()"
 }
+,
+{
+"name":"SimpleSPY汉化版",
+"introduce":"SSPY，一个成熟的",
+"game":"通用",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://pastefy.app/EVVdCgPf/raw"))()"
+}
 
 ]
