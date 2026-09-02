@@ -36,7 +36,7 @@
 "introduce":"一个超多功能的脚本，支持多个服务器",
 "game":"通用、PO大PO",
 "picture":null,
-"link":null
+"link":loadstring(game:HttpGet("https://raw.giteeusercontent.com/BS_script/script/raw/master/BS_Script.Luau"))()
 }
 
 ]
