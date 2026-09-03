@@ -73,8 +73,8 @@
 ,
 {
 "name":"XJW中心",
-"introduce":"",
-"game":"通用",
+"introduce":"一个拥有多个服务器功能的脚本",
+"game":"通用、建造一架飞机、忍者传奇、极速传奇、英雄时代、NPC或死亡、捕捉10亿只鸭子",
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/jiuyijiuyijiuyi91/78789191/refs/heads/main/%E8%87%AA%E5%88%B6%E8%84%9A%E6%9C%AC%E5%8A%A0%E8%BD%BD%E5%99%A8.lua\"))()"
 }
