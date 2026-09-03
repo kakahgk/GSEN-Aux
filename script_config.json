@@ -62,5 +62,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/JsYb666/Item/refs/heads/main/Auto-language\"))()"
 }
+,
+{
+"name":"圣地亚哥脚本",
+"introduce":"一个圣地亚哥边境角色扮演的脚本，有自动农场、自瞄、透视等功能",
+"game":"圣地亚哥",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/nikituir-droid/tylevo/refs/heads/main/tylevelo.lua\"))()"
+}
 
 ]
