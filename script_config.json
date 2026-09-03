@@ -54,5 +54,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://pastefy.app/EVVdCgPf/raw\"))()"
 }
+,
+{
+"name":"TX全自动翻译",
+"introduce":"一个可以自动翻译游戏、脚本UI界面文字的工具脚本",
+"game":"通用",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/JsYb666/Item/refs/heads/main/Auto-language\"))()"
+}
 
 ]
