@@ -78,5 +78,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/jiuyijiuyijiuyi91/78789191/refs/heads/main/%E8%87%AA%E5%88%B6%E8%84%9A%E6%9C%AC%E5%8A%A0%E8%BD%BD%E5%99%A8.lua\"))()"
 }
+,
+{
+"name":"偷一个蛋脚本",
+"introduce":"此脚本适用于偷一个蛋",
+"game":"偷一个蛋",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://pastefy.app/J29hE5fR/raw\"))()"
+}
 
 ]
