@@ -3582,10 +3582,282 @@ do
 	makeSlider(page, "自旋速度", 0.5, 100, 5, "", function(v) State.spinSpeed = v end, "spinSpeed")
 	makeSectionLabel(page, "无限跳")
 	makeToggle(page, "无限跳", function(v) State.infJumpEnabled = v end, nil, "infJumpEnabled")
+	makeSectionLabel(page, "飞车")
+	local carBV, carBG
+	local carConn = nil
+	local carSpeedWin = nil
+	local carWinSwitchUI = nil -- 飞车悬浮窗顶部的开关UI刷新 (由下方窗口块赋值)
+	local function setCar(on)
+		State.carEnabled = on
+		local char = getLocalChar()
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if on and hrp and hum then
+			if carBV then carBV:Destroy() end
+			if carBG then carBG:Destroy() end
+			carBV = trackInstance(Instance.new("BodyVelocity"))
+			carBV.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+			carBV.Velocity = Vector3.zero
+			carBV.Parent = hrp
+			carBG = trackInstance(Instance.new("BodyGyro"))
+			carBG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+			carBG.D = 1000
+			carBG.P = 300000
+			carBG.CFrame = Camera.CFrame
+			carBG.Parent = hrp
+			hum.AutoRotate = false -- 关闭自动转向, 只跟相机
+			if not carConn then
+				carConn = trackConnection(RunService.RenderStepped:Connect(function()
+					if not State.carEnabled then return end
+					local char = getLocalChar()
+					local root = char and char:FindFirstChild("HumanoidRootPart")
+					local hum = char and char:FindFirstChildOfClass("Humanoid")
+					if root and carBV and carBG and hum then
+						carBG.CFrame = Camera.CFrame
+						-- 读取游戏自带移动摇杆 (Humanoid.MoveDirection):
+						-- 摇杆前=W(前进), 摇杆后=S(后退), 左/右忽略;
+						-- PC 端 WASD 同样走 MoveDirection, 键盘天然兼容.
+						local look = Camera.CFrame.LookVector
+						local lookXZ = Vector3.new(look.X, 0, look.Z)
+						if lookXZ.Magnitude > 0.001 then lookXZ = lookXZ.Unit end
+						local mv = hum.MoveDirection
+						local mvXZ = Vector3.new(mv.X, 0, mv.Z)
+						local forward = mvXZ:Dot(lookXZ) -- 前=正, 后=负, 左右≈0
+						-- 用相机完整朝向(含上下俯仰)驱动, 抬/低头即可飞上/下
+						carBV.Velocity = look * forward * State.carSpeed
+					end
+				end))
+			end
+		else
+			if carBV then carBV:Destroy(); carBV = nil end
+			if carBG then carBG:Destroy(); carBG = nil end
+			if hum then hum.AutoRotate = true end
+		end
+	end
+	-- 页面"飞车开关": 只控制悬浮窗的显示/隐藏, 不启动飞车
+	local carWinToggle = makeToggle(page, "飞车开关", function(v)
+		State.carWindowShown = v
+		if carSpeedWin then carSpeedWin.Visible = v end
+		-- 打开窗口时, 让窗口内开关反映当前飞车真实状态
+		if v and carWinSwitchUI then carWinSwitchUI(State.carEnabled or false) end
+	end, nil, "carWindowShown")
+	makeToggle(page, "锁定位置", function(v)
+		State.carLockPos = v
+	end, nil, "carLockPos")
+	-- 飞车速度: 独立垂直滑动条悬浮窗
+	do
+		State.carSpeed = State.carSpeed or 50
+		local CS = State.carSpeed
+		local CS_MIN, CS_MAX = 10, 500
+		carSpeedWin = trackInstance(Instance.new("Frame"))
+		carSpeedWin.Name = "GSEN_CarSpeed"
+		carSpeedWin.Size = UDim2.new(0, 50, 0, 330)
+		carSpeedWin.Position = UDim2.new(0.5, -25, 0.8, 0)
+		carSpeedWin.BackgroundColor3 = Theme.Window
+		carSpeedWin.BorderSizePixel = 0
+		carSpeedWin.Active = true
+		carSpeedWin.Visible = false
+		carSpeedWin.ClipsDescendants = true
+		carSpeedWin.Parent = MainGui
+		local cwCorner = trackInstance(Instance.new("UICorner"))
+		cwCorner.CornerRadius = UDim.new(0, 8)
+		cwCorner.Parent = carSpeedWin
+		local cwStroke = trackInstance(Instance.new("UIStroke"))
+		cwStroke.Color = Theme.Stroke
+		cwStroke.Thickness = 1
+		cwStroke.Parent = carSpeedWin
+
+		local titleBar = trackInstance(Instance.new("TextLabel"))
+		titleBar.Size = UDim2.new(1, 0, 0, 26)
+		titleBar.BackgroundColor3 = Theme.TabBar
+		titleBar.Text = "飞车速度"
+		titleBar.Font = FontBold
+		titleBar.TextSize = 13
+		titleBar.TextColor3 = Theme.Text
+		titleBar.TextXAlignment = Enum.TextXAlignment.Center
+		titleBar.Parent = carSpeedWin
+		do
+			local dragging, dragStart, startPos
+			trackConnection(titleBar.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					if State.carLockPos then return end -- 锁定位置时不可拖动
+					dragging = true
+					dragStart = input.Position
+					startPos = carSpeedWin.Position
+				end
+			end))
+			trackConnection(titleBar.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					dragging = false
+				end
+			end))
+			trackConnection(UserInputService.InputChanged:Connect(function(input)
+				if State.carLockPos then dragging = false; return end -- 锁定: 立即停拖并固定
+				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+					local delta = input.Position - dragStart
+					carSpeedWin.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+				end
+			end))
+		end
+
+		-- 悬浮窗顶部开关: 真正控制飞车开关 (与页面"飞车开关"不同步, 页面只控制窗口显隐)
+		do
+			local cwTrack = trackInstance(Instance.new("Frame"))
+			cwTrack.Size = UDim2.fromOffset(40, 20)
+			cwTrack.Position = UDim2.new(0.5, -20, 0, 36)
+			cwTrack.BackgroundColor3 = Theme.Background
+			cwTrack.BorderSizePixel = 0
+			local cwtc = trackInstance(Instance.new("UICorner"))
+			cwtc.CornerRadius = UDim.new(1, 0)
+			cwtc.Parent = cwTrack
+			local cwts = trackInstance(Instance.new("UIStroke"))
+			cwts.Color = Theme.Stroke
+			cwts.Thickness = 1
+			cwts.Transparency = 0
+			cwts.Parent = cwTrack
+			cwTrack.Parent = carSpeedWin
+
+			local cwKnob = trackInstance(Instance.new("Frame"))
+			cwKnob.Size = UDim2.fromOffset(16, 16)
+			cwKnob.Position = UDim2.fromOffset(2, 2)
+			cwKnob.BackgroundColor3 = Theme.Text
+			cwKnob.BorderSizePixel = 0
+			local cwkc = trackInstance(Instance.new("UICorner"))
+			cwkc.CornerRadius = UDim.new(1, 0)
+			cwkc.Parent = cwKnob
+			cwKnob.Parent = cwTrack
+
+			local cwBtn = trackInstance(Instance.new("TextButton"))
+			cwBtn.Size = UDim2.new(1, 0, 1, 0)
+			cwBtn.BackgroundTransparency = 1
+			cwBtn.Text = ""
+			cwBtn.Parent = cwTrack
+
+			carWinSwitchUI = function(state)
+				TweenService:Create(cwKnob, TweenInfo.new(0.18, Enum.EasingStyle.Quad), {
+					Position = state and UDim2.fromOffset(22, 2) or UDim2.fromOffset(2, 2),
+				}):Play()
+				TweenService:Create(cwTrack, TweenInfo.new(0.18), {
+					BackgroundColor3 = state and Theme.GreenDark or Theme.Background,
+				}):Play()
+			end
+			trackConnection(cwBtn.MouseButton1Click:Connect(function()
+				-- 窗口内开关才是真正控制飞车的开关
+				local ns = not (State.carEnabled or false)
+				setCar(ns)
+				carWinSwitchUI(ns)
+			end))
+			carWinSwitchUI(State.carEnabled or false)
+		end
+
+		local sliderArea = trackInstance(Instance.new("Frame"))
+		sliderArea.Size = UDim2.new(1, -24, 1, -124)
+		sliderArea.Position = UDim2.new(0, 12, 0, 76)
+		sliderArea.BackgroundTransparency = 1
+		sliderArea.Parent = carSpeedWin
+		local trackV = trackInstance(Instance.new("Frame"))
+		trackV.Size = UDim2.new(0, 6, 1, 0)
+		trackV.Position = UDim2.new(0.5, -3, 0, 0)
+		trackV.BackgroundColor3 = Theme.Background
+		trackV.BorderSizePixel = 0
+		trackV.Parent = sliderArea
+		local tvCorner = trackInstance(Instance.new("UICorner"))
+		tvCorner.CornerRadius = UDim.new(1, 0)
+		tvCorner.Parent = trackV
+		local fillV = trackInstance(Instance.new("Frame"))
+		fillV.Size = UDim2.new(1, 0, 0.5, 0)
+		fillV.Position = UDim2.new(0, 0, 0.5, 0)
+		fillV.BackgroundColor3 = Theme.AccentDark
+		fillV.BorderSizePixel = 0
+		fillV.Parent = trackV
+		local thumb = trackInstance(Instance.new("Frame"))
+		thumb.Size = UDim2.new(0, 18, 0, 18)
+		thumb.BackgroundColor3 = Theme.Accent
+		thumb.BorderSizePixel = 0
+		thumb.Parent = sliderArea
+		local thCorner = trackInstance(Instance.new("UICorner"))
+		thCorner.CornerRadius = UDim.new(1, 0)
+		thCorner.Parent = thumb
+
+		local inputBox = trackInstance(Instance.new("TextBox"))
+		inputBox.Size = UDim2.new(1, -24, 0, 30)
+		inputBox.Position = UDim2.new(0, 12, 1, -36)
+		inputBox.BackgroundColor3 = Theme.Element
+		inputBox.BorderSizePixel = 0
+		inputBox.Font = FontBold
+		inputBox.TextSize = 16
+		inputBox.TextColor3 = Theme.Text
+		inputBox.TextXAlignment = Enum.TextXAlignment.Center
+		inputBox.PlaceholderText = "输入速度"
+		inputBox.PlaceholderColor3 = Theme.SubText
+		inputBox.Parent = carSpeedWin
+
+		local function layout(v)
+			local H = sliderArea.AbsoluteSize.Y
+			if H < 1 then H = 140 end
+			local frac = (v - CS_MIN) / (CS_MAX - CS_MIN)
+			local topY = H - frac * H
+			thumb.Position = UDim2.new(0.5, -9, 0, topY - 9)
+			fillV.Size = UDim2.new(1, 0, 0, H - topY)
+			fillV.Position = UDim2.new(0, 0, 0, topY)
+		end
+		local function ApplyCarSpeed(v)
+			v = math.clamp(math.round(v), CS_MIN, CS_MAX)
+			CS = v
+			State.carSpeed = v
+			inputBox.Text = tostring(v)
+			layout(v)
+		end
+
+		local draggingV
+		trackConnection(sliderArea.InputBegan:Connect(function(input)
+			if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			draggingV = true
+			local H = sliderArea.AbsoluteSize.Y
+			if H < 1 then H = 140 end
+			local top = sliderArea.AbsolutePosition.Y
+			local frac = math.clamp((top + H - input.Position.Y) / H, 0, 1)
+			ApplyCarSpeed(CS_MIN + frac * (CS_MAX - CS_MIN))
+		end))
+		trackConnection(UserInputService.InputChanged:Connect(function(input)
+			if not draggingV then return end
+			if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then return end
+			local H = sliderArea.AbsoluteSize.Y
+			if H < 1 then H = 140 end
+			local top = sliderArea.AbsolutePosition.Y
+			local frac = math.clamp((top + H - input.Position.Y) / H, 0, 1)
+			ApplyCarSpeed(CS_MIN + frac * (CS_MAX - CS_MIN))
+		end))
+		trackConnection(UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				draggingV = false
+			end
+		end))
+		trackConnection(inputBox.FocusLost:Connect(function(enter)
+			if not enter then return end
+			local n = tonumber(inputBox.Text)
+			if n then
+				ApplyCarSpeed(n)
+			else
+				inputBox.Text = tostring(CS)
+			end
+		end))
+		ConfigControls[#ConfigControls + 1] = {
+			key = "carSpeed",
+			kind = "slider",
+			get = function() return State.carSpeed end,
+			apply = function(v) ApplyCarSpeed(v) end,
+		}
+		ApplyCarSpeed(CS)
+		carSpeedWin.Visible = State.carWindowShown or false
+	end
 end
 
--- 超高速跑者页
-do
+-- 跑者模块仅在指定游戏中加载 (用 GameId 判断, 逻辑与开山页一致)
+-- 把下面 RUNNER_GAME_ID 的值改为你跑者游戏的 GameId (获取方法见对话说明); 保持 0 表示暂不启用
+local RUNNER_GAME_ID = 9485131494 -- 跑者游戏 GameId (9485131494)
+local isRunnerGame = (game.GameId == RUNNER_GAME_ID)
+if isRunnerGame then
 	local page = addTab("跑者", "👟")
 	makeSectionLabel(page, "平飞")
 	makeToggle(page, "平飞 (锁Y轴)", function(v)
@@ -3608,7 +3880,7 @@ do
 	makeToggle(page, "自动胜利", function(v)
 		Runner.toggleAutoWin(v)
 	end, nil, "runnerAutoWin")
-end
+end -- if isRunnerGame
 
 --========================================================
 -- 战斗页
@@ -6582,6 +6854,25 @@ do
 		ksTab.button.LayoutOrder = setOrder
 		setTab.button.LayoutOrder = ksOrder
 		ksTab.order, setTab.order = setOrder, ksOrder
+	end
+end
+
+-- 将跑者标签移到设置标签前面:
+-- 有开山时紧跟开山之后 (开山 < 跑者 < 设置);
+-- 无开山(跑者游戏)时紧跟设置之前 (客户端 < 跑者 < 设置)
+do
+	local ksTab = Tabs["开山"]
+	local runTab = Tabs["跑者"]
+	local setTab = Tabs["设置"]
+	if runTab and setTab then
+		local putOrder
+		if ksTab then
+			putOrder = ksTab.order + 0.5 -- 交换后开山与设置相邻, 插到两者之间
+		else
+			putOrder = setTab.order - 0.5 -- 无开山, 插到设置前面
+		end
+		runTab.button.LayoutOrder = putOrder
+		runTab.order = putOrder
 	end
 end
 
