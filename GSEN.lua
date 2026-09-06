@@ -5643,8 +5643,6 @@ local function saveConfig(name)
 			config[ctrl.key] = value
 		end
 	end
-	-- 记录保存配置时所在的地图 GameId, 供自动加载时校验地图匹配
-	config._gameId = game.GameId
 	local ok, json = pcall(function()
 		return HttpService:JSONEncode(config)
 	end)
@@ -5695,56 +5693,17 @@ local function loadConfig(name)
 	return true, applied
 end
 
--- 读取指定配置所属的地图 GameId (没有记录则返回 nil)
-local function configGameId(name)
-	if not name or name == "" then return nil end
-	name = name:gsub("[/\\:*?\"<>|%c]", "_")
-	local filePath = CONFIG_DIR .. "/" .. name .. "_config.json"
-	local content = safeReadFile(filePath)
-	if not content then return nil end
-	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
-	if ok and type(cfg) == "table" then
-		return type(cfg._gameId) == "number" and cfg._gameId or nil
-	end
-	return nil
-end
-
--- 自动加载配置的持久化 (保存/读取所选配置名及所属地图 GameId)
+-- 自动加载配置的持久化 (保存/读取所选配置名)
 local function saveAutoSelection(name)
-	local entry = { name = name or "" }
-	if name and name ~= "" then
-		entry.gameId = configGameId(name) or game.GameId
-	end
-	local ok, json = pcall(function() return HttpService:JSONEncode(entry) end)
+	local ok, json = pcall(function() return HttpService:JSONEncode({ name = name or "" }) end)
 	if ok and json then safeWriteFile(AUTO_CFG_FILE, json) end
 end
 local function readAutoSelection()
 	local content = safeReadFile(AUTO_CFG_FILE)
 	if not content then return nil end
 	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
-	if ok and type(cfg) == "table" then
-		local name = type(cfg.name) == "string" and cfg.name or nil
-		local gameId = type(cfg.gameId) == "number" and cfg.gameId or nil
-		if name and name ~= "" then
-			return name, gameId
-		end
-	end
+	if ok and type(cfg) == "table" and type(cfg.name) == "string" and cfg.name ~= "" then return cfg.name end
 	return nil
-end
-
--- 只列出"当前地图"可用的配置 (仅扫描属于当前 GameId 的配置)
-local function scanConfigsForCurrentGame()
-	local all = scanConfigs()
-	local currentGame = game.GameId
-	local out = {}
-	for i = 1, #all do
-		local cid = configGameId(all[i])
-		-- 配置无 _gameId 记录(旧版) 或 _gameId 与当前地图一致时归入当前地图
-		if cid == nil or cid == currentGame then
-			out[#out + 1] = all[i]
-		end
-	end
-	return out
 end
 
 -- 删除指定名称的配置
@@ -6595,21 +6554,20 @@ do
 	end)
 	selectedConfig = nil
 	local function buildAutoOpts()
-		local names = scanConfigsForCurrentGame()
+		local names = scanConfigs()
 		local opts = {"(关闭)"}
 		for i = 1, #names do opts[#opts + 1] = names[i] end
 		return opts
 	end
 	local autoOpts = buildAutoOpts()
 	local autoCurrent = readAutoSelection() or "(关闭)"
-	local autoDropdown = makeDropdown(page, "自动加载配置(当前地图)", autoOpts, autoCurrent, function(opt)
+	local autoDropdown = makeDropdown(page, "自动加载配置", autoOpts, autoCurrent, function(opt)
 		if opt == "(关闭)" then
 			saveAutoSelection("")
 			showToast("已关闭自动加载配置")
 		else
 			saveAutoSelection(opt)
-			local gid = configGameId(opt) or game.GameId
-			showToast("下次执行将自动加载配置: " .. opt .. "\n所属地图 GameId: " .. gid)
+			showToast("下次执行将自动加载配置: " .. opt)
 		end
 	end)
 	local function refreshAutoDropdown()
@@ -7913,18 +7871,11 @@ end))
 -- 初始化
 CountLabel.Visible = false
 applyWalkSpeed()
--- 启动时自动加载所选配置 (仅当配置所属地图 GameId 与当前地图一致时才加载)
-local autoLoadName, autoLoadGameId = readAutoSelection()
+-- 启动时自动加载所选配置: 下次执行自动加载
+local autoLoadName = readAutoSelection()
 if autoLoadName and autoLoadName ~= "" then
 	task.spawn(function()
 		task.wait(0.5)
-		-- 校验: 配置所属地图 GameId 必须等于当前地图 GameId 才允许自动加载
-		local binded = configGameId(autoLoadName)
-		local target = (binded ~= nil) and binded or (autoLoadGameId or game.GameId)
-		if target ~= game.GameId then
-			showToast("当前地图 GameId=" .. game.GameId .. " 与配置所属地图(" .. tostring(target) .. ")不一致\n自动加载已跳过")
-			return
-		end
 		pcall(loadConfig, autoLoadName)
 		showToast("已自动加载配置: " .. autoLoadName)
 	end)
