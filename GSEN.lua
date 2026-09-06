@@ -3907,6 +3907,28 @@ do
 end
 
 --========================================================
+-- 通用页
+--========================================================
+do
+	local page = addTab("通用", "🧭")
+	makeSectionLabel(page, "客户端")
+	makeToggle(page, "隐身", function(v) setInvisible(v) end, nil, "invisibleEnabled")
+	makeToggle(page, "锁定血量", function(v) setGodHealth(v) end, nil, "godHealthEnabled")
+	makeSlider(page, "血量值", 1, 9999, 100, "", function(v)
+		State.customHealth = v
+		if State.godHealthEnabled then
+			local c = getLocalChar()
+			local hum = c and c:FindFirstChildOfClass("Humanoid")
+			if hum then
+				hum.MaxHealth = v
+				hum.Health = v
+			end
+		end
+	end, "customHealth")
+
+end
+
+--========================================================
 -- 传送页
 --========================================================
 do
@@ -5556,26 +5578,6 @@ do
 	trackConnection(sendBtn.MouseLeave:Connect(function() sendBtn.BackgroundColor3 = Theme.AccentDark end))
 end
 
--- 客户端页
-do
-	local page = addTab("客户端", "🧍")
-	makeSectionLabel(page, "角色")
-	makeToggle(page, "隐身 (客户端)", function(v) setInvisible(v) end, nil, "invisibleEnabled")
-	makeSectionLabel(page, "血量")
-	makeToggle(page, "锁定血量", function(v) setGodHealth(v) end, nil, "godHealthEnabled")
-	makeSlider(page, "血量值", 1, 9999, 100, "", function(v)
-		State.customHealth = v
-		if State.godHealthEnabled then
-			local c = getLocalChar()
-			local hum = c and c:FindFirstChildOfClass("Humanoid")
-			if hum then
-				hum.MaxHealth = v
-				hum.Health = v
-			end
-		end
-	end, "customHealth")
-end
-
 --========================================================
 -- 配置保存 / 加载 (支持命名)
 --========================================================
@@ -5641,6 +5643,8 @@ local function saveConfig(name)
 			config[ctrl.key] = value
 		end
 	end
+	-- 记录保存配置时所在的地图 GameId, 供自动加载时校验地图匹配
+	config._gameId = game.GameId
 	local ok, json = pcall(function()
 		return HttpService:JSONEncode(config)
 	end)
@@ -5691,17 +5695,56 @@ local function loadConfig(name)
 	return true, applied
 end
 
--- 自动加载配置的持久化 (保存/读取所选配置名)
+-- 读取指定配置所属的地图 GameId (没有记录则返回 nil)
+local function configGameId(name)
+	if not name or name == "" then return nil end
+	name = name:gsub("[/\\:*?\"<>|%c]", "_")
+	local filePath = CONFIG_DIR .. "/" .. name .. "_config.json"
+	local content = safeReadFile(filePath)
+	if not content then return nil end
+	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
+	if ok and type(cfg) == "table" then
+		return type(cfg._gameId) == "number" and cfg._gameId or nil
+	end
+	return nil
+end
+
+-- 自动加载配置的持久化 (保存/读取所选配置名及所属地图 GameId)
 local function saveAutoSelection(name)
-	local ok, json = pcall(function() return HttpService:JSONEncode({ name = name or "" }) end)
+	local entry = { name = name or "" }
+	if name and name ~= "" then
+		entry.gameId = configGameId(name) or game.GameId
+	end
+	local ok, json = pcall(function() return HttpService:JSONEncode(entry) end)
 	if ok and json then safeWriteFile(AUTO_CFG_FILE, json) end
 end
 local function readAutoSelection()
 	local content = safeReadFile(AUTO_CFG_FILE)
 	if not content then return nil end
 	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
-	if ok and type(cfg) == "table" and type(cfg.name) == "string" and cfg.name ~= "" then return cfg.name end
+	if ok and type(cfg) == "table" then
+		local name = type(cfg.name) == "string" and cfg.name or nil
+		local gameId = type(cfg.gameId) == "number" and cfg.gameId or nil
+		if name and name ~= "" then
+			return name, gameId
+		end
+	end
 	return nil
+end
+
+-- 只列出"当前地图"可用的配置 (仅扫描属于当前 GameId 的配置)
+local function scanConfigsForCurrentGame()
+	local all = scanConfigs()
+	local currentGame = game.GameId
+	local out = {}
+	for i = 1, #all do
+		local cid = configGameId(all[i])
+		-- 配置无 _gameId 记录(旧版) 或 _gameId 与当前地图一致时归入当前地图
+		if cid == nil or cid == currentGame then
+			out[#out + 1] = all[i]
+		end
+	end
+	return out
 end
 
 -- 删除指定名称的配置
@@ -5751,6 +5794,434 @@ ConfigControls[#ConfigControls + 1] = {
 		end
 	end,
 }
+
+-- 竞技页 (手枪竞技场)
+local __jjj_ok, __jjj_err = pcall(function()
+	-- 竞技页地图检测: 仅竞技游戏 (GameId 9588121608) 显示
+	if game.GameId ~= 9588121608 then return end
+	local page = addTab("竞技", "🔫")
+
+	--============== 移速修改 ==============
+	makeSectionLabel(page, "移速修改")
+	local currentSpeed = 50
+	local speedConn = nil
+	makeToggle(page, "移速修改", function(on)
+		State.jjSpeedEnabled = on
+		if speedConn then speedConn:Disconnect(); speedConn = nil end
+		if on then
+			speedConn = RunService.Heartbeat:Connect(function()
+				local char = LocalPlayer.Character
+				local hum = char and char:FindFirstChild("Humanoid")
+				if char and hum and hum.MoveDirection.Magnitude > 0 then
+					char:TranslateBy(hum.MoveDirection * currentSpeed / 10)
+				end
+			end)
+		end
+	end, nil, "jjSpeedEnabled")
+	makeSlider(page, "移速", 1, 200, 50, "", function(v) State.jjSpeed = v; currentSpeed = v end, "jjSpeed")
+
+	--============== 玩家透视 ==============
+	makeSectionLabel(page, "玩家透视")
+	local jjESPEnabled = false
+	local espFolder = nil
+	local espGui = nil
+	local espNameSize = 14
+	local espRainbow = false
+	local espRainbowSpeed = 5
+	local espHue = 0
+	local espData = {}
+	local espUpdateConn = nil
+	local espRainbowConn = nil
+	local lastEspUpdate = 0
+
+	local function rainbowColor(h)
+		return Color3.fromHSV(h % 1, 1, 1)
+	end
+	local GREEN = Color3.fromRGB(0, 255, 127)
+
+	local function ensureEspGui()
+		if espGui and espGui.Parent then
+			if not espFolder or not espFolder.Parent then
+				espFolder = Instance.new("Folder")
+				espFolder.Name = "SportEspFolder"
+				espFolder.Parent = espGui
+			end
+			return
+		end
+		if espGui then espGui:Destroy() end
+		espGui = Instance.new("ScreenGui")
+		espGui.Name = "Sport_PlayerESP"
+		espGui.ResetOnSpawn = false
+		espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		espGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		espFolder = Instance.new("Folder")
+		espFolder.Name = "SportEspFolder"
+		espFolder.Parent = espGui
+	end
+
+	local function destroyPlayerEsp(player)
+		local d = espData[player]
+		if d then
+			if d.Billboard then d.Billboard:Destroy() end
+			if d.Highlight then d.Highlight:Destroy() end
+			espData[player] = nil
+		end
+	end
+
+	local function createPlayerEsp(player)
+		if player == LocalPlayer or not jjESPEnabled or not espFolder then return end
+		if espData[player] then
+			if not espData[player].Billboard or not espData[player].Billboard.Parent then
+				destroyPlayerEsp(player)
+			else
+				return
+			end
+		end
+		local character = player.Character
+		if not character then return end
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if not hrp then return end
+		local gui = Instance.new("BillboardGui")
+		gui.Name = player.Name
+		gui.Adornee = hrp
+		gui.Size = UDim2.new(0, 100, 0, 40)
+		gui.StudsOffset = Vector3.new(0, 3, 0)
+		gui.AlwaysOnTop = true
+		gui.MaxDistance = 500
+		gui.Parent = espFolder
+		local nameLbl = Instance.new("TextLabel")
+		nameLbl.Size = UDim2.new(1, 0, 0.5, 0)
+		nameLbl.BackgroundTransparency = 1
+		nameLbl.Font = Enum.Font.GothamBold
+		nameLbl.TextSize = espNameSize
+		nameLbl.TextColor3 = espRainbow and rainbowColor(espHue) or GREEN
+		nameLbl.TextStrokeTransparency = 0.5
+		nameLbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+		nameLbl.Text = player.Name
+		nameLbl.Parent = gui
+		local distLbl = Instance.new("TextLabel")
+		distLbl.Name = "DistanceLabel"
+		distLbl.Size = UDim2.new(1, 0, 0.5, 0)
+		distLbl.Position = UDim2.new(0, 0, 0.5, 0)
+		distLbl.BackgroundTransparency = 1
+		distLbl.Font = Enum.Font.Gotham
+		distLbl.TextSize = 12
+		distLbl.TextColor3 = Color3.fromRGB(240, 255, 245)
+		distLbl.TextStrokeTransparency = 0.5
+		distLbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+		distLbl.Parent = gui
+		local bodyColor = espRainbow and rainbowColor(espHue) or GREEN
+		local hl = Instance.new("Highlight")
+		hl.Adornee = character
+		hl.FillColor = bodyColor
+		hl.FillTransparency = 0.7
+		hl.OutlineColor = bodyColor
+		hl.OutlineTransparency = 0
+		hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		hl.Parent = espFolder
+		espData[player] = { Billboard = gui, Highlight = hl, NameLabel = nameLbl, DistanceLabel = distLbl }
+	end
+
+	local function updateEsp()
+		if not jjESPEnabled then return end
+		local t = tick()
+		if t - lastEspUpdate < 0.05 then return end
+		lastEspUpdate = t
+		pcall(function()
+			local chars = {}
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then
+					local character = player.Character
+					local hrp = character and character:FindFirstChild("HumanoidRootPart")
+					if character and hrp then
+						local d = espData[player]
+						if not d or not d.Billboard or not d.Billboard.Parent then
+							createPlayerEsp(player)
+							d = espData[player]
+						end
+						if d then
+							local myChar = LocalPlayer.Character
+							local myHRP = myChar and myChar:FindFirstChild("HumanoidRootPart")
+							if myHRP then
+								local dist = (myHRP.Position - hrp.Position).Magnitude
+								if d.DistanceLabel then d.DistanceLabel.Text = string.format("%.0f", dist) end
+								local visible = dist <= 500
+								if d.Billboard then d.Billboard.Enabled = visible end
+								if d.Highlight then d.Highlight.Enabled = visible end
+							end
+						end
+					else
+						destroyPlayerEsp(player)
+					end
+				end
+			end
+		end)
+	end
+
+	local function clearAllEsp()
+		for player in pairs(espData) do destroyPlayerEsp(player) end
+		espData = {}
+		if espFolder then
+			for _, child in ipairs(espFolder:GetChildren()) do child:Destroy() end
+		end
+	end
+
+	local function refreshEspColors()
+		local c = espRainbow and rainbowColor(espHue) or GREEN
+		for _, d in pairs(espData) do
+			if d.NameLabel then d.NameLabel.TextColor3 = c end
+			if d.Highlight then d.Highlight.FillColor = c; d.Highlight.OutlineColor = c end
+		end
+	end
+
+	local function startRainbow()
+		if espRainbowConn then espRainbowConn:Disconnect() end
+		espRainbowConn = RunService.RenderStepped:Connect(function(dt)
+			if jjESPEnabled and espRainbow then
+				espHue = espHue + dt * espRainbowSpeed / 10
+				if espHue >= 1 then espHue = espHue - 1 end
+				refreshEspColors()
+			end
+		end)
+	end
+
+	local function toggleEsp(on)
+		State.jjEspEnabled = on
+		jjESPEnabled = on
+		if on then
+			if espUpdateConn then espUpdateConn:Disconnect(); espUpdateConn = nil end
+			ensureEspGui()
+			clearAllEsp()
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then task.spawn(createPlayerEsp, player) end
+			end
+			espUpdateConn = RunService.Heartbeat:Connect(updateEsp)
+			startRainbow()
+		else
+			if espUpdateConn then espUpdateConn:Disconnect(); espUpdateConn = nil end
+			if espRainbowConn then espRainbowConn:Disconnect(); espRainbowConn = nil end
+			clearAllEsp()
+		end
+	end
+
+	LocalPlayer.CharacterAdded:Connect(function()
+		task.wait(1)
+		if jjESPEnabled then
+			ensureEspGui()
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then task.spawn(createPlayerEsp, player) end
+			end
+		end
+	end)
+	Players.PlayerAdded:Connect(function(player)
+		task.wait(0.5)
+		if jjESPEnabled then createPlayerEsp(player) end
+	end)
+	Players.PlayerRemoving:Connect(function(player) destroyPlayerEsp(player) end)
+
+	makeToggle(page, "玩家透视", toggleEsp, nil, "jjEspEnabled")
+	makeSlider(page, "名字大小", 10, 30, 14, "", function(v)
+		State.jjEspNameSize = v
+		espNameSize = v
+		for _, d in pairs(espData) do if d.NameLabel then d.NameLabel.TextSize = v end end
+	end, "jjEspNameSize")
+	makeToggle(page, "彩虹模式", function(on)
+		State.jjEspRainbow = on
+		espRainbow = on
+		if not on then refreshEspColors() end
+	end, nil, "jjEspRainbow")
+	makeSlider(page, "彩虹速度", 1, 30, 5, "", function(v) State.jjEspRainbowSpeed = v; espRainbowSpeed = v end, "jjEspRainbowSpeed")
+
+	--============== 摄像机 ==============
+	makeSectionLabel(page, "摄像机")
+	local cameraEnabled = false
+	local camDist = 50
+	local camConnection = nil
+	local function applyCam()
+		if not cameraEnabled then return end
+		pcall(function()
+			LocalPlayer.CameraMode = Enum.CameraMode.Classic
+			LocalPlayer.CameraMaxZoomDistance = camDist
+			LocalPlayer.CameraMinZoomDistance = camDist
+		end)
+	end
+	makeToggle(page, "锁定摄像机距离", function(on)
+		State.jjCamEnabled = on
+		cameraEnabled = on
+		if camConnection then camConnection:Disconnect(); camConnection = nil end
+		if on then
+			applyCam()
+			camConnection = RunService.RenderStepped:Connect(applyCam)
+		else
+			pcall(function()
+				LocalPlayer.CameraMode = Enum.CameraMode.Default
+				LocalPlayer.CameraMaxZoomDistance = 400
+				LocalPlayer.CameraMinZoomDistance = 0.5
+			end)
+		end
+	end, nil, "jjCamEnabled")
+	makeSlider(page, "摄像机距离", 10, 200, 50, "", function(v)
+		State.jjCamDist = v
+		camDist = v
+		if cameraEnabled then applyCam() end
+	end, "jjCamDist")
+
+	--============== 愤怒机器人 ==============
+	makeSectionLabel(page, "愤怒机器人")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local fireRate = 0.5
+	local forceHeadshot = true
+	local rageConn = nil
+	local lastShotTime = 0
+
+	local function getDamageRemote()
+		return ReplicatedStorage:WaitForChild("SystemResources"):WaitForChild("BufferCache"):WaitForChild("RequestActionSync")
+	end
+	local function getFakeBulletRemote()
+		return ReplicatedStorage:WaitForChild("Events"):WaitForChild("RemoteEvents"):WaitForChild("ReplicateFakeBullet")
+	end
+	local function getMuzzleRemote()
+		return ReplicatedStorage:WaitForChild("Events"):WaitForChild("RemoteEvents"):WaitForChild("CharacterMuzzleFlash")
+	end
+
+	local function playShootSound()
+		pcall(function()
+			local cam = workspace.CurrentCamera
+			if not cam then return end
+			local sound = Instance.new("Sound")
+			sound.SoundId = "rbxassetid://6534948092"
+			sound.Volume = 1
+			sound.Parent = cam
+			sound.PlayOnRemove = true
+			sound:Destroy()
+		end)
+	end
+
+	local function spawnBeam(startPos, endPos)
+		local distance = (endPos - startPos).Magnitude
+		if distance < 0.5 then return end
+		local beam = Instance.new("Part")
+		beam.Anchored = true
+		beam.CanCollide = false
+		beam.Size = Vector3.new(0.6, 0.6, distance)
+		beam.CFrame = CFrame.lookAt(startPos, endPos) * CFrame.new(0, 0, -distance / 2)
+		beam.Material = Enum.Material.Neon
+		beam.Color = Color3.fromRGB(255, 255, 255)
+		beam.Transparency = 0.1
+		beam.Parent = workspace
+		task.spawn(function()
+			task.wait(1)
+			beam:Destroy()
+		end)
+	end
+
+	local function shoot(player, targetPart, targetPos, origin)
+		local now = tick()
+		if now - lastShotTime < fireRate then return false end
+		local char = LocalPlayer.Character
+		if not char or not targetPart or not origin then return false end
+		local direction = (targetPos - origin).Unit
+		local cframe = CFrame.lookAt(origin, targetPos)
+		pcall(function()
+			local fb = getFakeBulletRemote()
+			if fb then fb:FireServer(cframe, direction) end
+		end)
+		pcall(function()
+			local mu = getMuzzleRemote()
+			if mu then mu:FireServer() end
+		end)
+		pcall(function()
+			local dr = getDamageRemote()
+			if dr then
+				dr:FireServer({
+					direction = direction,
+					hitPosition = targetPos,
+					origin = origin,
+					hitInstance = targetPart,
+					hitHumanoid = player.Character and player.Character:FindFirstChild("Humanoid"),
+					IsHeadshot = true
+				})
+			end
+		end)
+		spawnBeam(origin, targetPos)
+		playShootSound()
+		lastShotTime = now
+		return true
+	end
+
+	local function getVisibleTargets()
+		local targets = {}
+		local char = LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not hrp then return targets end
+		local origin = hrp.Position
+		for _, player in ipairs(Players:GetPlayers()) do
+			if player ~= LocalPlayer and player.Character then
+				local hum = player.Character:FindFirstChild("Humanoid")
+				if hum and hum.Health > 0 then
+					local part = player.Character:FindFirstChild("Head")
+					if not part or not part:IsA("BasePart") then
+						part = player.Character:FindFirstChild("HumanoidRootPart")
+					end
+					if part then
+						local visiblePos = part.Position
+						local o = hrp.Position + Vector3.new(0, 5, 0)
+						table.insert(targets, {
+							player = player,
+							distance = (visiblePos - origin).Magnitude,
+							part = part,
+							position = visiblePos,
+							origin = o
+						})
+					end
+				end
+			end
+		end
+		table.sort(targets, function(a, b) return a.distance < b.distance end)
+		return targets
+	end
+
+	makeSlider(page, "射速 (秒/发)", 5, 100, 10, "", function(v) State.jjFireRate = v; fireRate = v / 10 end, "jjFireRate")
+	local hsToggle = makeToggle(page, "锁定爆头", function(on) State.jjForceHeadshot = on; forceHeadshot = on end, nil, "jjForceHeadshot")
+	hsToggle.set(true)
+	makeToggle(page, "愤怒机器人", function(on)
+		State.jjRageEnabled = on
+		if rageConn then rageConn:Disconnect(); rageConn = nil end
+		if on then
+			rageConn = RunService.Heartbeat:Connect(function()
+				pcall(function()
+					local targets = getVisibleTargets()
+					if #targets > 0 then
+						local t = targets[1]
+						local part, pos, origin = t.part, t.position, t.origin
+						if forceHeadshot then
+							local head = t.player.Character:FindFirstChild("Head")
+							if head then part = head; pos = head.Position end
+						end
+						shoot(t.player, part, pos, origin)
+					end
+				end)
+			end)
+		end
+	end, nil, "jjRageEnabled")
+	makeButton(page, "测试射击", function()
+		pcall(function()
+			local targets = getVisibleTargets()
+			if #targets > 0 then
+				local t = targets[1]
+				local part, pos, origin = t.part, t.position, t.origin
+				if forceHeadshot then
+					local head = t.player.Character:FindFirstChild("Head")
+					if head then part = head; pos = head.Position end
+				end
+				shoot(t.player, part, pos, origin)
+			end
+		end)
+	end)
+end)
+if not __jjj_ok then
+    warn("[竞技页] 初始化失败: " .. tostring(__jjj_err))
+end
 
 -- 设置页
 do
@@ -6124,20 +6595,21 @@ do
 	end)
 	selectedConfig = nil
 	local function buildAutoOpts()
-		local names = scanConfigs()
+		local names = scanConfigsForCurrentGame()
 		local opts = {"(关闭)"}
 		for i = 1, #names do opts[#opts + 1] = names[i] end
 		return opts
 	end
 	local autoOpts = buildAutoOpts()
 	local autoCurrent = readAutoSelection() or "(关闭)"
-	local autoDropdown = makeDropdown(page, "自动加载配置", autoOpts, autoCurrent, function(opt)
+	local autoDropdown = makeDropdown(page, "自动加载配置(当前地图)", autoOpts, autoCurrent, function(opt)
 		if opt == "(关闭)" then
 			saveAutoSelection("")
 			showToast("已关闭自动加载配置")
 		else
 			saveAutoSelection(opt)
-			showToast("下次执行将自动加载配置: " .. opt)
+			local gid = configGameId(opt) or game.GameId
+			showToast("下次执行将自动加载配置: " .. opt .. "\n所属地图 GameId: " .. gid)
 		end
 	end)
 	local function refreshAutoDropdown()
@@ -7441,11 +7913,18 @@ end))
 -- 初始化
 CountLabel.Visible = false
 applyWalkSpeed()
--- 启动时自动加载所选配置: 下次执行自动加载
-local autoLoadName = readAutoSelection()
+-- 启动时自动加载所选配置 (仅当配置所属地图 GameId 与当前地图一致时才加载)
+local autoLoadName, autoLoadGameId = readAutoSelection()
 if autoLoadName and autoLoadName ~= "" then
 	task.spawn(function()
 		task.wait(0.5)
+		-- 校验: 配置所属地图 GameId 必须等于当前地图 GameId 才允许自动加载
+		local binded = configGameId(autoLoadName)
+		local target = (binded ~= nil) and binded or (autoLoadGameId or game.GameId)
+		if target ~= game.GameId then
+			showToast("当前地图 GameId=" .. game.GameId .. " 与配置所属地图(" .. tostring(target) .. ")不一致\n自动加载已跳过")
+			return
+		end
 		pcall(loadConfig, autoLoadName)
 		showToast("已自动加载配置: " .. autoLoadName)
 	end)
