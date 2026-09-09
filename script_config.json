@@ -94,5 +94,13 @@
 "picture":null,
 "link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/SyndromeXph/XK-Script/refs/heads/main/XoneK-Loader.luau\"))()"
 }
+,
+{
+"name":"刘脚本",
+"introduce":"此脚本适用于力量传奇游戏",
+"game":"力量传奇",
+"picture":null,
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/LYHfailing/Muscle-Legends/refs/heads/main/刘脚本力量传奇-作者2903144038脚本群810470906-免费脚本.lua\"))()"
+}
 
 ]
