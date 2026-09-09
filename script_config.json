@@ -92,7 +92,7 @@
 "introduce":"XK Hub重制版，更多服务器正在开发中",
 "game":"通用、亡命速递、死亡轨迹、竞争对手",
 "picture":null,
-"link":"loadstring(game:HttpGet(\"loadstring(game:HttpGet("https://raw.githubusercontent.com/SyndromeXph/XK-Script/refs/heads/main/XoneK-Loader.luau"))()\"))()"
+"link":"loadstring(game:HttpGet(\"https://raw.githubusercontent.com/SyndromeXph/XK-Script/refs/heads/main/XoneK-Loader.luau\"))()"
 }
 
 ]
