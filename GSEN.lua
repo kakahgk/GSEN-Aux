@@ -6182,6 +6182,161 @@ if not __jjj_ok then
     warn("[竞技页] 初始化失败: " .. tostring(__jjj_err))
 end
 
+-- ==================== 飞机页 ====================
+do
+	local __plnOk, __plnErr = pcall(function()
+		-- 仅飞机游戏 (GameId 7822444776) 显示飞机页
+		if game.GameId ~= 7822444776 then return end
+		local page = addTab("飞机", "✈")
+		makeSectionLabel(page, "方块防御")
+		State.planeImmortal = false
+		local plnHooked = false
+		local hasCaps = (type(hookmetamethod) == "function")
+			and (type(getnamecallmethod) == "function")
+			and (type(newcclosure) == "function")
+
+		local function installHook()
+			if plnHooked then return true end
+			if not hasCaps then return false end
+			local ok = pcall(function()
+				local old
+				old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+					if State.planeImmortal and getnamecallmethod() == "FireServer"
+						and typeof(self) == "Instance" and self.Name == "BlockBroken" then
+						return
+					end
+					return old(self, ...)
+				end))
+			end)
+			if ok then plnHooked = true end
+			return ok
+		end
+
+		makeToggle(page, "永不损坏", function(on)
+			State.planeImmortal = on
+			if on then
+				if not hasCaps then
+					showToast("当前环境不支持拦截功能")
+					State.planeImmortal = false
+				elseif not installHook() then
+					showToast("拦截钩子安装失败")
+					State.planeImmortal = false
+				else
+					showToast("永不损坏已开启: 拦截方块损坏上报")
+				end
+			else
+				showToast("永不损坏已关闭")
+		end
+	end)
+
+		-- 自动农场: 开启先启动一次, 之后人物复活5秒后再启动
+		State.planeAutoFarm = false
+		local afMoveConn = nil
+		local afCharConn = nil -- 人物复活事件连线
+		local afSpeed = 3000 -- 移动速度 (stud/s)
+		local afRevive = 0 -- 复活后的启动倒计时(秒)
+
+		local function stopAutoFarm()
+			if afMoveConn then afMoveConn:Disconnect(); afMoveConn = nil end
+			if afCharConn then afCharConn:Disconnect(); afCharConn = nil end
+			afRevive = 0
+		end
+
+		-- 仅当人物存活且未坐在椅子上时才允许执行启动代码
+		local function afCanFire()
+			local char = Players.LocalPlayer.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if not hum or hum.Health <= 0 then return false end
+			if hum.Sit or hum:FindFirstChild("SeatPart") then return false end
+			return true
+		end
+
+		local afMovePause = 0 -- 启动成功后的移动暂停倒计时(秒)
+		local afStopMove = false -- 人物死亡后冻结移动, 直到下次启动成功后恢复
+
+		-- 执行启动代码: 仅当角色存活且未坐着时触发, 成功后暂停移动3秒
+		local function doLaunch()
+			if not afCanFire() then return end
+			local ok = pcall(function()
+				game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("LaunchEvents"):WaitForChild("Launch"):FireServer()
+			end)
+			if ok then
+				afStopMove = false -- 下一次启动成功后解除冻结
+				afMovePause = 3 -- 执行成功后等待3秒再进行人物移动
+			end
+		end
+
+		makeToggle(page, "自动农场", function(on)
+			State.planeAutoFarm = on
+			if on then
+				stopAutoFarm()
+				afStopMove = false
+				-- 开启后立即执行一次启动代码
+				doLaunch()
+				-- 移动连线: 每个渲染帧沿X轴推进人物, 并处理启动与移动暂停
+				afMoveConn = RunService.Heartbeat:Connect(function(dt)
+					local char = Players.LocalPlayer.Character
+					local hum = char and char:FindFirstChildOfClass("Humanoid")
+					-- 人物死亡: 结束按规划路线的移动并冻结, 直到下次启动成功才恢复
+					if hum and hum.Health <= 0 then
+						afStopMove = true
+					end
+					-- 人物复活满5秒: 执行一次启动代码
+					if afRevive > 0 then
+						afRevive = afRevive - dt
+						if afRevive <= 0 then
+							afRevive = 0
+							doLaunch()
+						end
+					end
+					-- 启动成功后先暂停3秒, 期间人物不移动
+					if afMovePause > 0 then
+						afMovePause = afMovePause - dt
+					end
+					if afMovePause <= 0 and not afStopMove then
+						local root = char and char:FindFirstChild("HumanoidRootPart")
+						if root and hum and hum.Health > 0 then
+							local pos = root.Position
+							pos = Vector3.new(pos.X + afSpeed * dt, 1000, -322)
+							root.CFrame = CFrame.new(pos)
+						end
+					end
+				end)
+				-- 人物复活: 5秒后触发一次启动代码
+				afCharConn = Players.LocalPlayer.CharacterAdded:Connect(function()
+					afRevive = 5 -- 复活5秒后执行启动代码
+				end)
+				showToast("自动农场已开启 (复活5秒后启动)")
+			else
+				stopAutoFarm()
+				showToast("自动农场已关闭")
+			end
+		end)
+
+		-- 速度调节: 控制自动农场的移动速度, 实时生效
+		makeSlider(page, "移动速度", 100, 5000, 3000, "", function(v)
+			afSpeed = v
+		end, "planeFarmSpeed")
+
+		-- 手动启动: 点击后立即执行一次Launch
+		makeButton(page, "手动启动", function()
+			pcall(function()
+				game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("LaunchEvents"):WaitForChild("Launch"):FireServer()
+			end)
+		end)
+
+		-- 手动返回: 点击后立即执行一次Return
+		makeButton(page, "手动返回", function()
+			pcall(function()
+				game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("LaunchEvents"):WaitForChild("Return"):FireServer()
+			end)
+		end)
+		end)
+	if not __plnOk then
+		warn("[飞机页] 初始化失败: " .. tostring(__plnErr))
+	end
+end
+
 -- 设置页
 do
 	-- 在构建 UI 前加载保存的动画模式, 确保 dropdown 初始值正确
