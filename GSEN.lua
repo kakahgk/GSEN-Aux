@@ -1,3 +1,17 @@
+--[[
+免责声明：
+本代码、示例仅用于计算机技术学习、原理研究，仅供教育参考。
+禁止将本内容用于作弊、扰乱游戏服务、破坏他人游戏体验、绕过平台安全机制等违反Roblox用户协议以及法律法规的行为。
+使用者一切实际操作行为与产生的全部后果，均由使用者本人自行承担，与代码作者无关。
+使用即代表同意本声明。
+]]
+--[[
+DISCLAIMER:
+All code is for educational and research purposes only.
+Do not use for cheating, exploiting or violating platform Terms of Service.
+All risks and consequences shall be borne solely by the end‑user.
+By using this code, you agree to this disclaimer.
+]]
 --==================== 服务与变量 ====================
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -29,6 +43,8 @@ local State = {
 	flySpeed       = 60,
 	flingEnabled   = false,
 	flingTarget    = nil,
+	-- 运动相机
+	motionCameraEnabled = false,
 	-- 旋转
 	spinEnabled    = false,
 	spinSpeed      = 5,
@@ -64,6 +80,14 @@ local State = {
 	aimDistance = 500,
 	aimHeadLock = 100,   -- 概率锁头 0-100%, 仅 aimPart=="Head" 时生效
 	wallCheck   = true,
+	-- 自瞄白名单 (不瞄准的玩家)
+	aimWhitelist = {},
+	-- 白名单开关: 仅开启时才不瞄准白名单内玩家
+	aimWhitelistEnabled = false,
+	-- 自瞄黑名单 (只瞄准这些玩家)
+	aimBlacklist = {},
+	-- 黑名单开关: 仅开启时才只瞄准黑名单内玩家
+	aimBlacklistEnabled = false,
 	-- 展开动画
 	animMode    = "碎片",  -- 碎片 / 平滑 (会被 loadAnimMode 覆盖)
 	teamCheck   = true,
@@ -1428,8 +1452,11 @@ local function makeSlider(parent, text, min, max, default, suffix, callback, con
 end
 
 -- 下拉框 (列表 + 透明全屏按钮均挂载到 MainGui, 不受 Content.ClipsDescendants 裁切)
-local function makeDropdown(parent, text, options, default, callback, configKey)
+local function makeDropdown(parent, text, options, default, callback, configKey, colorSource)
 	local container = trackInstance(Instance.new("TextButton"))
+	-- options 可为列表, 也可为函数(返回列表): 展开/刷新时自动重新求值
+	local optionSource = type(options)=="function" and options or function() return options end
+	local currentOptions = optionSource()
 	container.Size = UDim2.new(1, -5, 0, 36)
 	container.BackgroundColor3 = Theme.Element
 	container.BorderSizePixel = 0
@@ -1476,7 +1503,7 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 
 	-- 列表挂到 MainGui 层, 不受 Content / page 的 ClipsDescendants 裁切
 	local MAX_LIST_HEIGHT = 140
-	local listHeight = math.min(#options * 28, MAX_LIST_HEIGHT)
+	local listHeight = math.min(#currentOptions * 28, MAX_LIST_HEIGHT)
 	local list = trackInstance(Instance.new("ScrollingFrame"))
 	list.BackgroundColor3 = Theme.Element
 	list.BorderSizePixel = 0
@@ -1484,7 +1511,7 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 	list.ZIndex = 50
 	list.ScrollBarThickness = 4
 	list.ScrollBarImageColor3 = Theme.Stroke
-	list.CanvasSize = UDim2.new(0, 0, 0, #options * 28)
+	list.CanvasSize = UDim2.new(0, 0, 0, #currentOptions * 28)
 	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	list.ClipsDescendants = true
 	list.Active = true
@@ -1505,7 +1532,7 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 
 	-- ---- 开关列表 ----
 	local renderConn = nil
-	local closeList, openList
+	local closeList, openList, rebuild
 
 	closeList = function()
 		list.Visible = false
@@ -1518,6 +1545,7 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 	end
 
 	openList = function()
+		rebuild() -- 展开时自动刷新选项列表
 		-- 立即设置位置和尺寸, 不等 RenderStepped
 		local cPos  = container.AbsolutePosition
 		local cSize = container.AbsoluteSize
@@ -1550,12 +1578,12 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 	end))
 
 	-- 创建选项按钮
-	local function createOptionButton(opt)
+	local function createOptionButton(opt, optColor)
 		local b = trackInstance(Instance.new("TextButton"))
 		b.Size = UDim2.new(1, 0, 0, 28)
 		b.BackgroundColor3 = Theme.Element
 		b.Text = "  " .. opt
-		b.TextColor3 = Theme.Text
+		b.TextColor3 = optColor or Theme.Text
 		b.Font = FontMain
 		b.TextSize = 13
 		b.TextXAlignment = Enum.TextXAlignment.Left
@@ -1572,9 +1600,23 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 		b.Parent = list
 	end
 
-	for _, opt in ipairs(options) do
-		createOptionButton(opt)
+	-- 重建选项列表 (展开时自动刷新)
+	rebuild = function(optColors)
+		for _, child in ipairs(list:GetChildren()) do
+			if child:IsA("TextButton") then child:Destroy() end
+		end
+		currentOptions = optionSource()
+		listHeight = math.min(#currentOptions * 28, MAX_LIST_HEIGHT)
+		list.CanvasSize = UDim2.new(0, 0, 0, #currentOptions * 28)
+		local colors = optColors
+		if not colors and colorSource then
+			pcall(function() colors = colorSource() end)
+		end
+		for _, opt in ipairs(currentOptions) do
+			createOptionButton(opt, colors and colors[opt])
+		end
 	end
+	rebuild()
 
 	trackConnection(container.MouseButton1Click:Connect(function()
 		if list.Visible then closeList() else openList() end
@@ -1587,7 +1629,7 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 
 	-- 设置选项 (配置加载用)
 	local function setOption(opt)
-		for _, o in ipairs(options) do
+		for _, o in ipairs(currentOptions) do
 			if o == opt then
 				valLbl.Text = opt
 				task.spawn(callback, opt)
@@ -1597,20 +1639,17 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 	end
 
 	container.Parent = parent
-	-- 刷新选项列表
-	local function refresh(newOptions)
-		-- 清空旧选项按钮
-		for _, child in ipairs(list:GetChildren()) do
-			if child:IsA("TextButton") then
-				child:Destroy()
-			end
+	-- 刷新选项列表 (newOptions 可为列表, 亦可为函数-展开时自动刷新)
+	local function refresh(newOptions, optColors)
+		if type(newOptions) == "function" then
+			optionSource = newOptions
+		elseif newOptions ~= nil then
+			optionSource = function() return newOptions end
 		end
-		options = newOptions
-		listHeight = math.min(#options * 28, MAX_LIST_HEIGHT)
-		list.CanvasSize = UDim2.new(0, 0, 0, #options * 28)
-		for _, opt in ipairs(options) do
-			createOptionButton(opt)
+		if optColors then
+			colorSource = function() return optColors end
 		end
+		rebuild(optColors)
 	end
 	if configKey then
 		ConfigControls[#ConfigControls + 1] = {
@@ -1620,6 +1659,204 @@ local function makeDropdown(parent, text, options, default, callback, configKey)
 		}
 	end
 	return {container = container, refresh = refresh, valLbl = valLbl, setOption = setOption}
+end
+
+-- 多选下拉框 (勾选式, 可多选)
+local function makeMultiDropdown(parent, text, options, callback)
+	local container = trackInstance(Instance.new("TextButton"))
+	-- options 可为列表, 也可为函数(返回列表): 展开/刷新时自动重新求值
+	local optionSource = type(options)=="function" and options or function() return options end
+	local currentOptions = optionSource()
+	container.Size = UDim2.new(1, -5, 0, 36)
+	container.BackgroundColor3 = Theme.Element
+	container.BorderSizePixel = 0
+	container.Text = ""
+	container.AutoButtonColor = false
+	local cc = trackInstance(Instance.new("UICorner"))
+	cc.CornerRadius = UDim.new(0, 6)
+	cc.Parent = container
+
+	local label = trackInstance(Instance.new("TextLabel"))
+	label.Size = UDim2.new(1, -160, 1, 0)
+	label.Position = UDim2.fromOffset(12, 0)
+	label.BackgroundTransparency = 1
+	label.Text = text
+	label.TextColor3 = Theme.Text
+	label.Font = FontMain
+	label.TextSize = 13
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.ZIndex = 11
+	label.Parent = container
+
+	local valLbl = trackInstance(Instance.new("TextLabel"))
+	valLbl.Size = UDim2.new(0, 130, 1, 0)
+	valLbl.Position = UDim2.new(1, -138, 0, 0)
+	valLbl.BackgroundTransparency = 1
+	valLbl.Text = "未选择"
+	valLbl.TextColor3 = Theme.Accent
+	valLbl.Font = FontBold
+	valLbl.TextSize = 13
+	valLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	valLbl.TextXAlignment = Enum.TextXAlignment.Right
+	valLbl.ZIndex = 11
+	valLbl.Parent = container
+
+	-- 透明全屏按钮: 列表展开时拦截外部点击 → 关闭列表
+	local catcher = trackInstance(Instance.new("TextButton"))
+	catcher.Size = UDim2.new(1, 0, 1, 0)
+	catcher.BackgroundTransparency = 1
+	catcher.Text = ""
+	catcher.AutoButtonColor = false
+	catcher.Visible = false
+	catcher.ZIndex = 49
+	catcher.Parent = MainGui
+
+	-- 列表挂到 MainGui 层, 不受 Content / page 的 ClipsDescendants 裁切
+	local MAX_LIST_HEIGHT = 150
+	local listHeight = math.min(#currentOptions * 28, MAX_LIST_HEIGHT)
+	local list = trackInstance(Instance.new("ScrollingFrame"))
+	list.BackgroundColor3 = Theme.Element
+	list.BorderSizePixel = 0
+	list.Visible = false
+	list.ZIndex = 50
+	list.ScrollBarThickness = 4
+	list.ScrollBarImageColor3 = Theme.Stroke
+	list.CanvasSize = UDim2.new(0, 0, 0, #currentOptions * 28)
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ClipsDescendants = true
+	list.Active = true
+	list.Parent = MainGui
+
+	local lc = trackInstance(Instance.new("UICorner"))
+	lc.CornerRadius = UDim.new(0, 6)
+	lc.Parent = list
+
+	local lst = trackInstance(Instance.new("UIStroke"))
+	lst.Color = Theme.Stroke
+	lst.Thickness = 1
+	lst.Transparency = 0.3
+	lst.Parent = list
+
+	local ll = trackInstance(Instance.new("UIListLayout"))
+	ll.Parent = list
+
+	local selected = {}
+	local renderConn = nil
+	local closeList, openList, refreshList, updateVal
+
+	local function sync()
+		task.spawn(callback, selected)
+	end
+
+	updateVal = function()
+		local n = 0
+		for _ in pairs(selected) do n = n + 1 end
+		valLbl.Text = (n == 0) and "未选择" or ("已选 " .. n)
+	end
+
+	closeList = function()
+		list.Visible = false
+		catcher.Visible = false
+		container.ZIndex = 1
+		if renderConn then
+			renderConn:Disconnect()
+			renderConn = nil
+		end
+	end
+
+	openList = function()
+		currentOptions = optionSource() -- 展开时自动刷新选项列表
+		listHeight = math.min(#currentOptions * 28, MAX_LIST_HEIGHT)
+		list.CanvasSize = UDim2.new(0, 0, 0, #currentOptions * 28)
+		refreshList()
+		local cPos  = container.AbsolutePosition
+		local cSize = container.AbsoluteSize
+		list.Position = UDim2.fromOffset(cPos.X + 6, cPos.Y + 38)
+		list.Size = UDim2.new(0, cSize.X - 12, 0, listHeight)
+		list.Visible = true
+		catcher.Visible = true
+		container.ZIndex = 10
+		if renderConn then renderConn:Disconnect() end
+		renderConn = RunService.RenderStepped:Connect(function()
+			local ok = pcall(function()
+				if not list.Visible then return end
+				local cp = container.AbsolutePosition
+				local cs = container.AbsoluteSize
+				list.Position = UDim2.fromOffset(cp.X + 6, cp.Y + 38)
+				list.Size = UDim2.new(0, cs.X - 12, 0, listHeight)
+			end)
+			if not ok and renderConn then
+				renderConn:Disconnect()
+				renderConn = nil
+			end
+		end)
+		trackConnection(renderConn)
+	end
+
+	refreshList = function()
+		for _, child in ipairs(list:GetChildren()) do
+			if child:IsA("TextButton") then
+				child:Destroy()
+			end
+		end
+		for _, opt in ipairs(currentOptions) do
+			local b = trackInstance(Instance.new("TextButton"))
+			b.Size = UDim2.new(1, 0, 0, 28)
+			b.BackgroundColor3 = Theme.Element
+			local isSel = selected[opt] == true
+			b.Text = (isSel and "  ☑ " or "  ☐ ") .. opt
+			b.TextColor3 = isSel and Color3.fromRGB(0, 255, 0) or Theme.Text
+			b.Font = FontMain
+			b.TextSize = 13
+			b.TextXAlignment = Enum.TextXAlignment.Left
+			b.AutoButtonColor = false
+			b.BorderSizePixel = 0
+			b.ZIndex = 51
+			trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = Theme.Hover end))
+			trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = Theme.Element end))
+			trackConnection(b.MouseButton1Click:Connect(function()
+				if selected[opt] then
+					selected[opt] = nil
+				else
+					selected[opt] = true
+				end
+				updateVal()
+				refreshList()
+				sync()
+			end))
+			b.Parent = list
+		end
+	end
+
+	trackConnection(catcher.MouseButton1Click:Connect(function()
+		closeList()
+	end))
+
+	trackConnection(container.MouseButton1Click:Connect(function()
+		if list.Visible then closeList() else openList() end
+	end))
+
+	trackConnection(parent:GetPropertyChangedSignal("Visible"):Connect(function()
+		if not parent.Visible then closeList() end
+	end))
+
+	container.Parent = parent
+	return {
+		container = container,
+		valLbl = valLbl,
+		refresh = function(newOptions)
+			if type(newOptions) == "function" then
+				optionSource = newOptions
+			elseif newOptions ~= nil then
+				optionSource = function() return newOptions end
+			end
+			currentOptions = optionSource()
+			listHeight = math.min(#currentOptions * 28, MAX_LIST_HEIGHT)
+			list.CanvasSize = UDim2.new(0, 0, 0, #currentOptions * 28)
+			refreshList()
+		end,
+		getSelected = function() return selected end,
+	}
 end
 
 -- 普通按钮
@@ -2899,7 +3136,113 @@ setFling = function(on)
 end
 
 --========================================================
--- 3.5 环绕模块
+-- 3.5 运动相机模块 (Motion Camera)
+--========================================================
+-- 独立的第三人称运动相机: 拖动旋转/滚轮缩放/触屏双指捏合
+local mocCamDist     = 8
+local mocYaw         = 0
+local mocPitch       = 0
+local mocLastCF      = Workspace.CurrentCamera.CFrame
+local mocSmooth      = 0.10
+local mocHeightOff   = 1.8
+local mocMinDist     = 4
+local mocMaxDist     = 50
+local mocRotPc       = 0.003
+local mocRotMobile   = 0.010
+local mocZoomPc      = 2.5
+local mocZoomMobile  = 0.5
+local mocMinPitch    = math.rad(-70)
+local mocMaxPitch    = math.rad(80)
+local mocCamRender   = nil
+local mocHrp         = nil
+local mocCharAddedConn = nil
+
+local function onMocCharacter(char)
+	mocHrp = char:WaitForChild("HumanoidRootPart")
+end
+mocCharAddedConn = LocalPlayer.CharacterAdded:Connect(onMocCharacter)
+if LocalPlayer.Character then
+	pcall(function() onMocCharacter(LocalPlayer.Character) end)
+end
+
+trackConnection(UserInputService.InputChanged:Connect(function(input, gpe)
+	if gpe then return end
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		mocYaw   -= input.Delta.X * mocRotPc
+		mocPitch -= input.Delta.Y * mocRotPc
+	elseif input.UserInputType == Enum.UserInputType.Touch then
+		mocYaw   -= input.Delta.X * mocRotMobile
+		mocPitch -= input.Delta.Y * mocRotMobile
+	end
+	mocPitch = math.clamp(mocPitch, mocMinPitch, mocMaxPitch)
+end))
+
+trackConnection(UserInputService.InputChanged:Connect(function(input, gpe)
+	if gpe then return end
+	if input.UserInputType == Enum.UserInputType.MouseWheel then
+		mocCamDist -= input.Position.Z * mocZoomPc
+		mocCamDist = math.clamp(mocCamDist, mocMinDist, mocMaxDist)
+	end
+end))
+
+local mocTouches = {}
+local mocLastPinchDist
+local function mocPinchDist()
+	if #mocTouches < 2 then return nil end
+	return (mocTouches[1].Position - mocTouches[2].Position).Magnitude
+end
+trackConnection(UserInputService.TouchStarted:Connect(function(input)
+	table.insert(mocTouches, input)
+	if #mocTouches == 2 then mocLastPinchDist = mocPinchDist() end
+end))
+trackConnection(UserInputService.TouchEnded:Connect(function(input)
+	for i, t in ipairs(mocTouches) do
+		if t == input then table.remove(mocTouches, i); break end
+	end
+	mocLastPinchDist = nil
+end))
+trackConnection(UserInputService.TouchMoved:Connect(function()
+	if #mocTouches ~= 2 then return end
+	local dist = mocPinchDist()
+	if not dist or not mocLastPinchDist then return end
+	mocCamDist -= (dist - mocLastPinchDist) * mocZoomMobile
+	mocCamDist = math.clamp(mocCamDist, mocMinDist, mocMaxDist)
+	mocLastPinchDist = dist
+end))
+
+-- 开关: 开启后接管摄像机, 关闭恢复默认跟随
+setMotionCamera = function(on)
+	State.motionCameraEnabled = on
+	if on then
+		if mocCamRender then mocCamRender:Disconnect(); mocCamRender = nil end
+		mocLastCF = Workspace.CurrentCamera.CFrame
+		mocCamRender = RunService.RenderStepped:Connect(function()
+			if not State.motionCameraEnabled or not mocHrp then return end
+			local focus  = mocHrp.Position + Vector3.new(0, mocHeightOff, 0)
+			local offset = CFrame.fromEulerAnglesYXZ(mocPitch, mocYaw, 0):VectorToWorldSpace(Vector3.new(0, 0, mocCamDist))
+			local targetCF = CFrame.new(focus + offset, focus)
+			mocLastCF = mocLastCF:Lerp(targetCF, mocSmooth)
+			Workspace.CurrentCamera.CFrame = mocLastCF
+		end)
+	else
+		if mocCamRender then mocCamRender:Disconnect(); mocCamRender = nil end
+		Workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+	end
+end
+
+-- 供通用页滑动条更新内部参数
+setMocSmooth = function(v)
+	mocSmooth = v
+end
+setMocMaxDist = function(v)
+	mocMaxDist = v
+	if mocCamDist then
+		mocCamDist = math.clamp(mocCamDist, mocMinDist, mocMaxDist)
+	end
+end
+
+--========================================================
+-- 3.6 环绕模块
 --========================================================
 setOrbit = function(on)
 	State.orbitEnabled = on
@@ -3225,7 +3568,15 @@ local function getAimTarget()
 	local best, bestDist = nil, math.huge
 
 	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= LocalPlayer and not sameTeam(p) and isAlive(p) then
+		local aimOk
+		if State.aimBlacklistEnabled then
+			aimOk = State.aimBlacklist[p.Name] ~= nil -- 黑名单: 仅瞄准选中玩家
+		elseif State.aimWhitelistEnabled then
+			aimOk = State.aimWhitelist[p.Name] == nil -- 白名单: 不瞄准选中玩家
+		else
+			aimOk = true
+		end
+		if p ~= LocalPlayer and not sameTeam(p) and isAlive(p) and aimOk then
 			local part = getTargetPart(p, State.aimPart)
 			if part then
 				if (part.Position - camPos).Magnitude > State.aimDistance then
@@ -3511,7 +3862,7 @@ do
 end
 
 -- 移动页
-do
+(function()
 	local page = addTab("移动", "✈")
 	makeSectionLabel(page, "角色移动")
 	makeToggle(page, "移速开关", function(v)
@@ -3851,7 +4202,7 @@ do
 		ApplyCarSpeed(CS)
 		carSpeedWin.Visible = State.carWindowShown or false
 	end
-end
+end)()
 
 -- 跑者模块仅在指定游戏中加载 (用 GameId 判断, 逻辑与开山页一致)
 -- 把下面 RUNNER_GAME_ID 的值改为你跑者游戏的 GameId (获取方法见对话说明); 保持 0 表示暂不启用
@@ -3904,6 +4255,41 @@ do
 	makeToggle(page, "墙体检测", function(v) State.wallCheck = v end, nil, "wallCheck")
 	makeToggle(page, "队伍检测", function(v) State.teamCheck = v end, nil, "teamCheck")
 	makeToggle(page, "活体检测", function(v) State.aliveCheck = v end, nil, "aliveCheck")
+
+	-- 自瞄白名单: 多选不被自瞄的玩家
+	local wlToggle, blToggle -- 前置声明, 供互斥回调解引用
+	wlToggle = makeToggle(page, "白名单开关", function(v)
+		State.aimWhitelistEnabled = v
+		if v and blToggle then
+			State.aimBlacklistEnabled = false
+			blToggle.set(false)
+		end
+	end, nil, "aimWhitelistEnabled")
+	local function getWhitelistOptions()
+		local list = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LocalPlayer then
+				table.insert(list, p.Name)
+			end
+		end
+		if #list == 0 then list = {"(无其他玩家)"} end
+		return list
+	end
+	local aimWL = makeMultiDropdown(page, "自瞄白名单", getWhitelistOptions, function(sel)
+		State.aimWhitelist = sel or {}
+	end)
+
+	-- 自瞄黑名单: 多选仅瞄准这些玩家
+	blToggle = makeToggle(page, "黑名单开关", function(v)
+		State.aimBlacklistEnabled = v
+		if v and wlToggle then
+			State.aimWhitelistEnabled = false
+			wlToggle.set(false)
+		end
+	end, nil, "aimBlacklistEnabled")
+	local aimBL = makeMultiDropdown(page, "自瞄黑名单", getWhitelistOptions, function(sel)
+		State.aimBlacklist = sel or {}
+	end)
 end
 
 --========================================================
@@ -3926,12 +4312,274 @@ do
 		end
 	end, "customHealth")
 
+	--============== 摄像机 ==============
+	makeSectionLabel(page, "摄像机")
+	makeToggle(page, "运动相机", setMotionCamera, nil, "motionCameraEnabled")
+	makeSlider(page, "平滑度", 0.01, 1, 0.1, "", setMocSmooth)
+	makeSlider(page, "最大距离", 0, 200, 50, "", setMocMaxDist)
+
+	-- 甩飞 (从传送页移入)
+	makeSectionLabel(page, "甩飞")
+	local flingTarget = nil
+	local function getFlingPlayerList()
+		local list = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LocalPlayer then
+				table.insert(list, p.Name)
+			end
+		end
+		if #list == 0 then list = {"(无其他玩家)"} end
+		return list
+	end
+	local flingDropdown = makeDropdown(page, "甩飞目标", getFlingPlayerList, "(选择玩家)", function(opt)
+		flingTarget = opt
+		State.flingTarget = opt
+	end)
+	makeButton(page, "甩飞玩家一次", function()
+		if not flingTarget or flingTarget == "(无其他玩家)" or flingTarget == "(选择玩家)" then return end
+		local target = Players:FindFirstChild(flingTarget)
+		if not target then return end
+		local targetChar = target.Character
+		if not targetChar then return end
+		local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+		if not targetRoot then return end
+		local myChar = LocalPlayer.Character
+		if not myChar then return end
+		local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+		if not myRoot then return end
+
+		-- 保存原位置
+		local savedCF = myRoot.CFrame
+
+		-- 创建 BodyVelocity 启动阶段
+		local bv = Instance.new("BodyVelocity")
+		bv.Name = "EpixVel"
+		bv.Parent = myRoot
+		bv.Velocity = Vector3.new(900000000, 900000000, 900000000)
+		bv.MaxForce = Vector3.new(1 / 0, 1 / 0, 1 / 0)
+
+		-- 执行甩飞动画: 连续改变位置/旋转, 极高速度+角速度
+		task.spawn(function()
+			local rotationAngle = 0
+			local startTime = tick()
+			local TIMEOUT = 5  -- 超时 5 秒
+
+			while myRoot and myRoot.Parent and targetRoot and targetRoot.Parent do
+				if tick() - startTime > TIMEOUT then break end
+
+				local velMag = targetRoot.Velocity.Magnitude
+				if velMag < 50 then
+					rotationAngle = rotationAngle + 100
+
+					-- 四个位置循环, 改变 CFrame + 极高 Velocity/RotVelocity
+					local positions = {
+						CFrame.new(0, 1.5, 0),
+						CFrame.new(0, -1.5, 0),
+						CFrame.new(2.25, 1.5, -2.25),
+						CFrame.new(-2.25, -1.5, 2.25),
+					}
+
+					for _, offset in ipairs(positions) do
+						if not myRoot or not myRoot.Parent then break end
+						local cf = CFrame.new(targetRoot.Position) * offset * CFrame.Angles(math.rad(rotationAngle), 0, 0)
+						myChar:SetPrimaryPartCFrame(cf)
+						myRoot.Velocity = Vector3.new(90000000, 900000000, 90000000)
+						myRoot.RotVelocity = Vector3.new(900000000, 900000000, 900000000)
+						task.wait()
+					end
+				end
+
+				if targetRoot.Velocity.Magnitude > 500 then
+					break
+				end
+			end
+
+			-- 清理: 移除 BodyVelocity, 恢复位置
+			if bv and bv.Parent then bv:Destroy() end
+			if myRoot and myRoot.Parent then
+				myRoot.Velocity = Vector3.zero
+				myRoot.RotVelocity = Vector3.zero
+				myRoot.CFrame = savedCF
+			end
+		end)
+	end)
+	local flingToggle = makeToggle(page, "静默甩飞", function(v) setFling(v) end, nil, "flingEnabled")
+	flingToggleSet = flingToggle.set
+
+	--============== R15 下蹲 ==============
+	makeSectionLabel(page, "R15下蹲");
+	(function()
+		local crouchOn = false        -- R15下蹲 总开关
+		local crouchActive = false    -- 当前是否处于下蹲状态
+		local crouchWalkSpeed = 16    -- 记录原移速
+		local crouchJumpPower = 50    -- 记录原跳力
+		local crouchIdleAnim = nil    -- 蹲伏动画
+		local crouchMoveAnim = nil    -- 爬行动画
+		local crouchHeartbeat = nil   -- 心跳连接
+		local crouchBtn = nil         -- 触屏下蹲按钮
+		local crouchJumpBtn = nil     -- 游戏自带跳转按钮引用
+		local crouchSync = nil        -- 触屏按钮显隐刷新
+		local ANIM_IDLE = 137525751454426
+		local ANIM_MOVE = 107078800928182
+		local BTN_NORMAL = 109660173469064
+		local BTN_ACTIVE = 139705395031155
+
+		local function crouchHumanoid()
+			local c = LocalPlayer.Character
+			return c and c:FindFirstChildOfClass("Humanoid")
+		end
+
+		local function crouchStopAnims()
+			if crouchIdleAnim then pcall(function() crouchIdleAnim:Stop() end) end
+			if crouchMoveAnim then pcall(function() crouchMoveAnim:Stop() end) end
+		end
+
+		local function crouchEnter()
+			local hum = crouchHumanoid()
+			if not hum then
+				showToast("未找到角色")
+				return
+			end
+			crouchActive = true
+			crouchWalkSpeed = hum.WalkSpeed
+			crouchJumpPower = hum.JumpPower
+
+			local a1, a2 = Instance.new("Animation"), Instance.new("Animation")
+			a1.AnimationId = "rbxassetid://" .. ANIM_IDLE
+			a2.AnimationId = "rbxassetid://" .. ANIM_MOVE
+			pcall(function() crouchIdleAnim = hum:LoadAnimation(a1) end)
+			pcall(function() crouchMoveAnim = hum:LoadAnimation(a2) end)
+			if crouchMoveAnim then pcall(function() crouchMoveAnim:AdjustSpeed(0.2) end) end
+
+			if crouchIdleAnim then pcall(function() crouchIdleAnim:Play() end) end
+			pcall(function() hum.JumpPower = 0 end)
+			pcall(function() hum.WalkSpeed = 8 end)
+
+			if crouchHeartbeat then pcall(function() crouchHeartbeat:Disconnect() end) crouchHeartbeat = nil end
+			crouchHeartbeat = trackConnection(RunService.Heartbeat:Connect(function()
+				if not crouchOn then return end
+				local h = crouchHumanoid()
+				if not h or h.Health <= 0 or not crouchActive then return end
+				if h.MoveDirection.Magnitude > 0.1 then
+					if crouchIdleAnim and crouchIdleAnim.IsPlaying then pcall(function() crouchIdleAnim:Stop() end) end
+					if crouchMoveAnim and not crouchMoveAnim.IsPlaying then pcall(function() crouchMoveAnim:Play() end) end
+				else
+					if crouchMoveAnim and crouchMoveAnim.IsPlaying then pcall(function() crouchMoveAnim:Stop() end) end
+					if crouchIdleAnim and not crouchIdleAnim.IsPlaying then pcall(function() crouchIdleAnim:Play() end) end
+				end
+			end))
+			if crouchJumpBtn then pcall(function() crouchJumpBtn.Visible = false end) end
+			if crouchBtn then pcall(function() crouchBtn.Image = "rbxassetid://" .. BTN_ACTIVE end) end
+			showToast("R15下蹲开启 (按 Ctrl/C 切换)")
+		end
+
+		local function crouchLeave()
+			crouchActive = false
+			if crouchHeartbeat then pcall(function() crouchHeartbeat:Disconnect() end) crouchHeartbeat = nil end
+			crouchStopAnims()
+			crouchIdleAnim, crouchMoveAnim = nil, nil
+			local hum = crouchHumanoid()
+			if hum then
+				pcall(function() hum.WalkSpeed = crouchWalkSpeed or hum.WalkSpeed end)
+				pcall(function() hum.JumpPower = crouchJumpPower or hum.JumpPower end)
+			end
+			if crouchJumpBtn then pcall(function() crouchJumpBtn.Visible = true end) end
+			if crouchBtn then pcall(function() crouchBtn.Image = "rbxassetid://" .. BTN_NORMAL end) end
+		end
+
+		-- 创建触屏下蹲按钮 (加回原版触屏按钮)
+		local function createCrouchButton()
+			-- 查找游戏自带跳跃按钮以定位
+			local jumpBtn = nil
+			pcall(function()
+				local b = LocalPlayer.PlayerGui:FindFirstChild("JumpButton", true)
+				if b and b:IsA("ImageButton") then jumpBtn = b end
+			end)
+			if not jumpBtn then
+				pcall(function()
+					for _, v in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+						if v:IsA("ImageButton") and string.find(string.lower(v.Name), "jump") then
+							jumpBtn = v
+							break
+						end
+					end
+				end)
+			end
+
+			local gui = trackInstance(Instance.new("ScreenGui"))
+			gui.Name = "CrouchGui"
+			gui.ResetOnSpawn = false
+			gui.Parent = LocalPlayer.PlayerGui
+
+			local btn = trackInstance(Instance.new("ImageButton"))
+			btn.Name = "CrouchButton"
+			btn.BackgroundTransparency = 1
+			btn.Image = "rbxassetid://" .. BTN_NORMAL
+			btn.Parent = gui
+			btn.Visible = false -- 默认隐藏, 需开关开启才显示
+
+			if jumpBtn then
+				btn.Size = jumpBtn.Size
+				btn.Position = UDim2.new(0, jumpBtn.AbsolutePosition.X - (jumpBtn.AbsoluteSize.X + 10), 0, jumpBtn.AbsolutePosition.Y)
+				crouchJumpBtn = jumpBtn
+			else
+				btn.Size = UDim2.new(0, 60, 0, 60)
+				btn.Position = UDim2.new(0, 50, 1, -150)
+			end
+
+			btn.MouseButton1Click:Connect(function()
+				if not crouchOn then return end
+				if crouchActive then crouchLeave() else crouchEnter() end
+			end)
+
+			-- 触屏输入且开关开启时才显示, 否则隐藏
+			local function updateVisibility()
+				if not crouchOn then
+					btn.Visible = false
+					return
+				end
+				btn.Visible = UserInputService:GetLastInputType() == Enum.UserInputType.Touch
+			end
+			crouchSync = updateVisibility
+			trackConnection(UserInputService.LastInputTypeChanged:Connect(updateVisibility))
+			updateVisibility()
+
+			return btn
+		end
+		local ok, btn = pcall(createCrouchButton)
+		if ok and btn then crouchBtn = btn end
+
+		makeToggle(page, "R15下蹲开关", function(v)
+			crouchOn = v
+			if v then crouchEnter() else crouchLeave() end
+			if crouchSync then crouchSync() else if crouchBtn then crouchBtn.Visible = false end end
+		end, nil, "r15CrouchEnabled")
+
+		trackConnection(UserInputService.InputBegan:Connect(function(input, gpe)
+			if gpe or not crouchOn then return end
+			if input.KeyCode == Enum.KeyCode.LeftControl or input.KeyCode == Enum.KeyCode.C then
+				if crouchActive then crouchLeave() else crouchEnter() end
+			end
+		end))
+
+		trackConnection(LocalPlayer.CharacterAdded:Connect(function()
+			if crouchActive then
+				crouchActive = false
+				crouchStopAnims()
+			end
+			if crouchOn then
+				task.delay(0.5, function()
+					if crouchOn then crouchEnter() end
+				end)
+			end
+		end))
+	end)()
 end
 
 --========================================================
 -- 传送页
 --========================================================
-do
+(function()
 	local page = addTab("传送", "↗")
 	-- 坐标传送 (置顶: 传送页第一个小标题)
 	local function makeTextInput(parent, text, default, placeholder, callback)
@@ -4023,10 +4671,10 @@ do
 		local p = root.Position
 		savedPos[name] = { X = p.X, Y = p.Y, Z = p.Z }
 		writeSavedPos()
-		if posDropdown then posDropdown.refresh(savedPosNames()) end
+		if posDropdown then posDropdown.refresh(savedPosNames) end
 		showToast("已保存坐标: " .. name)
 	end)
-	local posDropdown = makeDropdown(page, "选择坐标", savedPosNames(), "(选择坐标)", function(name)
+	local posDropdown = makeDropdown(page, "选择坐标", savedPosNames, "(选择坐标)", function(name)
 		if name == "(无已存坐标)" then return end
 		local pos = savedPos[name]
 		if not pos then return end
@@ -4035,8 +4683,46 @@ do
 		ctZ.box.Text = string.format("%.0f", pos.Z)
 		showToast("已加载坐标: " .. name)
 	end)
-	makeSectionLabel(page, "传送 / 甩飞")
+	makeSectionLabel(page, "传送")
 	local teleportTarget = nil
+
+	-- 好友列表: 异步读取本地玩家的好友 UserId 集合
+	local friendIds = {}
+	task.spawn(function()
+		local ok, pages = pcall(function()
+			return Players:GetFriendsAsync(LocalPlayer.UserId)
+		end)
+		if ok and pages then
+			pcall(function()
+				while true do
+					for _, f in ipairs(pages:GetCurrentPage()) do
+						friendIds[f.Id] = true
+					end
+					if pages.IsFinished then break end
+					pages:AdvanceToNextPageAsync()
+				end
+			end)
+		end
+		-- 好友加载完成后刷新一次下拉框, 应用好友绿色高亮
+		task.spawn(function()
+			task.wait(0.3)
+			pcall(function()
+				tpDropdown.refresh(getPlayerList, getFriendColors)
+			end)
+		end)
+	end)
+
+	-- 生成选项颜色表: 好友名字显示为绿色
+	local function getFriendColors()
+		local colors = {}
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LocalPlayer and friendIds[p.UserId] then
+				colors[p.Name] = Color3.fromRGB(0, 255, 0)
+			end
+		end
+		return colors
+	end
+
 	local function getPlayerList()
 		local list = {}
 		for _, p in ipairs(Players:GetPlayers()) do
@@ -4049,21 +4735,12 @@ do
 		end
 		return list
 	end
-	local tpDropdown = makeDropdown(page, "目标玩家", getPlayerList(), "(选择玩家)", function(opt)
+	local tpDropdown = makeDropdown(page, "目标玩家", getPlayerList, "(选择玩家)", function(opt)
 		teleportTarget = opt
 		State.flingTarget = opt
 		State.orbitTarget = opt
 		State.loopTpTarget = opt
-	end)
-	makeButton(page, "刷新玩家列表", function()
-		local newList = getPlayerList()
-		tpDropdown.refresh(newList)
-		tpDropdown.valLbl.Text = "(选择玩家)"
-		teleportTarget = nil
-		State.flingTarget = nil
-		State.orbitTarget = nil
-		State.loopTpTarget = nil
-	end)
+	end, nil, getFriendColors)
 	makeButton(page, "传送到该玩家", function()
 		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
 		local target = Players:FindFirstChild(teleportTarget)
@@ -4078,6 +4755,7 @@ do
 		if not myRoot then return end
 		myRoot.CFrame = targetRoot.CFrame + Vector3.new(0, 3, 0)
 	end)
+	local loopTpToggle = makeToggle(page, "循环传送指定玩家", function(v) setLoopTp(v) end, nil, "loopTpEnabled")
 	makeButton(page, "拉取该玩家到身边", function()
 		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
 		local target = Players:FindFirstChild(teleportTarget)
@@ -4092,77 +4770,6 @@ do
 		if not myRoot then return end
 		targetRoot.CFrame = myRoot.CFrame + Vector3.new(0, 3, 0)
 	end)
-	makeButton(page, "甩飞玩家一次", function()
-		if not teleportTarget or teleportTarget == "(无其他玩家)" or teleportTarget == "(选择玩家)" then return end
-		local target = Players:FindFirstChild(teleportTarget)
-		if not target then return end
-		local targetChar = target.Character
-		if not targetChar then return end
-		local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-		if not targetRoot then return end
-		local myChar = LocalPlayer.Character
-		if not myChar then return end
-		local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-		if not myRoot then return end
-
-		-- 保存原位置
-		local savedCF = myRoot.CFrame
-
-		-- 创建 BodyVelocity 启动阶段
-		local bv = Instance.new("BodyVelocity")
-		bv.Name = "EpixVel"
-		bv.Parent = myRoot
-		bv.Velocity = Vector3.new(900000000, 900000000, 900000000)
-		bv.MaxForce = Vector3.new(1 / 0, 1 / 0, 1 / 0)
-
-		-- 执行甩飞动画: 连续改变位置/旋转, 极高速度+角速度
-		task.spawn(function()
-			local rotationAngle = 0
-			local startTime = tick()
-			local TIMEOUT = 5  -- 超时 5 秒
-
-			while myRoot and myRoot.Parent and targetRoot and targetRoot.Parent do
-				if tick() - startTime > TIMEOUT then break end
-
-				local velMag = targetRoot.Velocity.Magnitude
-				if velMag < 50 then
-					rotationAngle = rotationAngle + 100
-
-					-- 四个位置循环, 改变 CFrame + 极高 Velocity/RotVelocity
-					local positions = {
-						CFrame.new(0, 1.5, 0),
-						CFrame.new(0, -1.5, 0),
-						CFrame.new(2.25, 1.5, -2.25),
-						CFrame.new(-2.25, -1.5, 2.25),
-					}
-
-					for _, offset in ipairs(positions) do
-						if not myRoot or not myRoot.Parent then break end
-						local cf = CFrame.new(targetRoot.Position) * offset * CFrame.Angles(math.rad(rotationAngle), 0, 0)
-						myChar:SetPrimaryPartCFrame(cf)
-						myRoot.Velocity = Vector3.new(90000000, 900000000, 90000000)
-						myRoot.RotVelocity = Vector3.new(900000000, 900000000, 900000000)
-						task.wait()
-					end
-				end
-
-				if targetRoot.Velocity.Magnitude > 500 then
-					break
-				end
-			end
-
-			-- 清理: 移除 BodyVelocity, 恢复位置
-			if bv and bv.Parent then bv:Destroy() end
-			if myRoot and myRoot.Parent then
-				myRoot.Velocity = Vector3.zero
-				myRoot.RotVelocity = Vector3.zero
-				myRoot.CFrame = savedCF
-			end
-		end)
-	end)
-	local flingToggle = makeToggle(page, "静默甩飞", function(v) setFling(v) end, nil, "flingEnabled")
-	flingToggleSet = flingToggle.set
-
 	makeSectionLabel(page, "环绕")
 	local orbitToggle = makeToggle(page, "环绕目标玩家", function(v) setOrbit(v) end, nil, "orbitEnabled")
 	orbitToggleSet = orbitToggle.set
@@ -4170,9 +4777,8 @@ do
 	makeSlider(page, "环绕速度", 0.5, 100, 5, "", function(v) State.orbitSpeed = v end, "orbitSpeed")
 
 	makeSectionLabel(page, "循环传送")
-	local loopTpToggle = makeToggle(page, "循环传送指定玩家", function(v) setLoopTp(v) end, nil, "loopTpEnabled")
 	local loopTpAllToggle = makeToggle(page, "循环传送敌对玩家", function(v) setLoopTpAll(v) end, nil, "loopTpAllEnabled")
-end
+end)()
 
 --========================================================
 -- 音乐页 (酷狗音乐 API)
@@ -4468,7 +5074,7 @@ local function playSong(song, statusLabel)
 end
 
 -- 音乐页
-do
+(function()
 	local page = addTab("酷狗", "🎵")
 	makeSectionLabel(page, "酷狗音乐搜索")
 
@@ -4853,11 +5459,14 @@ do
 			end
 		end
 	end))
-end
+end)()
 
 --========================================================
 -- 网易云音乐页 (music.163.com API) — 独立状态, 不影响酷狗音乐
+-- 整体包进独立函数以隔离作用域(创建新帧), 避免全局寄存器超限
 --========================================================
+local neteaseScope
+neteaseScope = function()
 local NeteaseState = {
 	searchResults = {},
 	currentSound  = nil,
@@ -5088,7 +5697,7 @@ local function playNeteaseSong(song, statusLabel)
 end
 
 -- 网易云音乐页
-do
+(function()
 	local page = addTab("网易云", "🎧")
 	makeSectionLabel(page, "网易云音乐搜索")
 
@@ -5491,10 +6100,13 @@ do
 			end
 		end
 	end))
+end)()
 end
+neteaseScope() -- 网易云音乐 独立作用域执行
 
--- 交互页
-do
+-- 交互页 (独立作用域, 避免寄存器超限)
+local interactScope
+interactScope = function()
 	local page = addTab("交互", "✋")
 	makeSectionLabel(page, "ProximityPrompt")
 	makeToggle(page, "秒交互 (ProximityPrompt)", function(v) setInstantPrompt(v) end, nil, "promptInstantEnabled")
@@ -5577,13 +6189,28 @@ do
 	trackConnection(sendBtn.MouseEnter:Connect(function() sendBtn.BackgroundColor3 = Theme.Accent end))
 	trackConnection(sendBtn.MouseLeave:Connect(function() sendBtn.BackgroundColor3 = Theme.AccentDark end))
 end
+interactScope() -- 交互页 独立作用域执行
 
 --========================================================
 -- 配置保存 / 加载 (支持命名)
 --========================================================
 
+-- 自动加载配置的持久化 (保存/读取所选配置名) — 用全局函数, 不占主帧寄存器
+function saveAutoSelection(name)
+	local ok, json = pcall(function() return HttpService:JSONEncode({ name = name or "" }) end)
+	if ok and json then safeWriteFile(AUTO_CFG_FILE, json) end
+end
+function readAutoSelection()
+	local content = safeReadFile(AUTO_CFG_FILE)
+	if not content then return nil end
+	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
+	if ok and type(cfg) == "table" and type(cfg.name) == "string" and cfg.name ~= "" then return cfg.name end
+	return nil
+end
+
 -- 扫描 GSEN 目录下所有 *_config.json, 返回配置名列表
-local function scanConfigs()
+local cfgApi = (function()
+	local function scanConfigs()
 	local list = {}
 	-- 策略1: 优先使用 listfiles 扫描目录
 	if _listfiles and _isfolder and _isfolder(CONFIG_DIR) then
@@ -5693,19 +6320,6 @@ local function loadConfig(name)
 	return true, applied
 end
 
--- 自动加载配置的持久化 (保存/读取所选配置名)
-local function saveAutoSelection(name)
-	local ok, json = pcall(function() return HttpService:JSONEncode({ name = name or "" }) end)
-	if ok and json then safeWriteFile(AUTO_CFG_FILE, json) end
-end
-local function readAutoSelection()
-	local content = safeReadFile(AUTO_CFG_FILE)
-	if not content then return nil end
-	local ok, cfg = pcall(function() return HttpService:JSONDecode(content) end)
-	if ok and type(cfg) == "table" and type(cfg.name) == "string" and cfg.name ~= "" then return cfg.name end
-	return nil
-end
-
 -- 删除指定名称的配置
 local function deleteConfig(name)
 	if not name or name == "" then
@@ -5739,6 +6353,13 @@ local function deleteConfig(name)
 	end
 	return true
 end
+	return {
+		scan = scanConfigs,
+		save = saveConfig,
+		load = loadConfig,
+		del = deleteConfig,
+	}
+end)()
 
 -- 手动注册飞行速度 (飞行面板使用自定义输入框而非 makeSlider)
 ConfigControls[#ConfigControls + 1] = {
@@ -6338,7 +6959,7 @@ do
 end
 
 -- 设置页
-do
+(function()
 	-- 在构建 UI 前加载保存的动画模式, 确保 dropdown 初始值正确
 	local savedMode = loadAnimMode()
 	if savedMode and (savedMode == "碎片" or savedMode == "平滑") then
@@ -6347,9 +6968,10 @@ do
 	local page = addTab("设置", "⚙")
 	-- 反挂机 (从超高速跑者模块移入设置页)
 	makeSectionLabel(page, "防挂机")
-	makeToggle(page, "反挂机", function(v)
+	local afkToggle = makeToggle(page, "反挂机", function(v)
 		Runner.toggleAntiAFK(v)
 	end, nil, "runnerAntiAFK")
+	afkToggle.set(true) -- 默认开启反挂机 (已保存的配置仍可覆盖)
 	-- 抽成可复用: 设置页按钮与头像点击共用
 	openAbout = function()
 		-- 如果已存在则先销毁
@@ -6676,10 +7298,10 @@ do
 				showToast("✗ 请输入配置名称")
 				return
 			end
-			local ok, info = saveConfig(name)
+			local ok, info = cfgApi.save(name)
 			if ok then
 				showToast("✓ 配置已保存\n名称: " .. name)
-				local newList = scanConfigs()
+				local newList = cfgApi.scan()
 				configDropdown.refresh(newList)
 				configDropdown.valLbl.Text = name
 				selectedConfig = name
@@ -6704,19 +7326,19 @@ do
 
 	-- 已保存的配置列表
 	makeSectionLabel(page, "已保存的配置")
-	configDropdown = makeDropdown(page, "选择配置", scanConfigs(), "(无配置)", function(opt)
+	configDropdown = makeDropdown(page, "选择配置", cfgApi.scan, "(无配置)", function(opt)
 		selectedConfig = opt
 	end)
 	selectedConfig = nil
 	local function buildAutoOpts()
-		local names = scanConfigs()
+		local names = cfgApi.scan()
 		local opts = {"(关闭)"}
 		for i = 1, #names do opts[#opts + 1] = names[i] end
 		return opts
 	end
 	local autoOpts = buildAutoOpts()
 	local autoCurrent = readAutoSelection() or "(关闭)"
-	local autoDropdown = makeDropdown(page, "自动加载配置", autoOpts, autoCurrent, function(opt)
+	local autoDropdown = makeDropdown(page, "自动加载配置", buildAutoOpts, autoCurrent, function(opt)
 		if opt == "(关闭)" then
 			saveAutoSelection("")
 			showToast("已关闭自动加载配置")
@@ -6733,7 +7355,7 @@ do
 
 	-- 刷新列表按钮
 	makeButton(page, "刷新配置列表", function()
-		local newList = scanConfigs()
+		local newList = cfgApi.scan()
 		configDropdown.refresh(newList)
 		if #newList == 0 then
 			configDropdown.valLbl.Text = "(无配置)"
@@ -6752,7 +7374,7 @@ do
 			showToast("✗ 请先选择一个配置")
 			return
 		end
-		local ok, result = loadConfig(selectedConfig)
+		local ok, result = cfgApi.load(selectedConfig)
 		if ok then
 			showToast("✓ 配置已加载\n名称: " .. selectedConfig .. "\n已应用 " .. tostring(result) .. " 项设置")
 		else
@@ -6768,10 +7390,10 @@ do
 		end
 		local configName = selectedConfig
 		showConfirmDialog("确认删除配置？\n名称: " .. configName, function()
-			local ok, err = deleteConfig(configName)
+			local ok, err = cfgApi.del(configName)
 			if ok then
 				showToast("✓ 配置已删除\n名称: " .. configName)
-				local newList = scanConfigs()
+				local newList = cfgApi.scan()
 				configDropdown.refresh(newList)
 				if #newList == 0 then
 					configDropdown.valLbl.Text = "(无配置)"
@@ -6834,15 +7456,17 @@ do
 		end
 		showToast("✓ 网易云缓存已清理\n删除 " .. count .. " 个文件")
 	end)
-end
+end)()
 
 --========================================================
 -- 开山模块 (集成版) - 从原脚本提取核心逻辑, 使用 GSENAux UI 辅助函数
 -- 移除 Obsidian UI 库, 改用 makeSectionLabel/makeToggle/makeSlider/makeButton/makeDropdown
 -- Library:Notify -> showToast, Library.Toggles -> KS_Toggles, Library.Options -> 局部变量
 --========================================================
--- 用 IIFE 包裹, 避免开山模块的局部变量挤占主脚本 200 个局部变量上限
+-- 用独立函数包裹, 避免开山模块的局部变量挤占主脚本 200 个局部变量上限
 -- 开山模块仅在「开采一座山」中加载 (UniverseId: 10187294555)
+local kaishanScope
+kaishanScope = function()
 local KAISHAN_UNIVERSE_ID = 10187294555
 local isKaishanGame = (game.GameId == KAISHAN_UNIVERSE_ID)
 local function initKaishan()
@@ -7426,10 +8050,1193 @@ end)
 if not ksOk then
 	warn("[GSEN辅助] 开山模块初始化失败: " .. tostring(ksErr))
 end
+end
+kaishanScope(); -- 开山模块独立作用域执行
 --========================================================
 -- 开山模块 (集成版) 结束
 --========================================================
 
+--========================================================
+-- 文件管理页 (像文件管理器) — 访问/修改/删除/新增 工作区文件
+-- 独立作用域隔离局部变量
+--========================================================
+local fileManagerScope
+fileManagerScope = function()
+	local page = addTab("文件", "📁")
+
+	-- 本次会话内解析 delfolder (部分执行器提供)
+	local _delfolder = resolveFileFunc("delfolder")
+
+	local CurPath = ""
+	local Rows = {}   -- 动态行实例, 刷新时销毁重建
+	local ListOk = _listfiles ~= nil
+	local entries = {folders = {}, files = {}}
+
+	-- ══ 显式前向声明 (对付超大脚本/部分执行器分段编译) ══
+	-- 本页内部互相调用的函数先声明为 local 占位(nil), 再用赋值式定义绑定,
+	-- 彻底消除任何执行器/大文件下前向引用出现 nil 的风险(修复 "attempt to call a nil value")
+	local enterFolder, goRoot, goUp, refresh
+	local deleteEntry, openEditor, renameFile, newFileUI, newFolderUI
+	local actBtn, buildRow
+
+	local function fmtPath(dir)
+		if not dir or dir == "" then return "(工作区根目录)" end
+		return dir
+	end
+
+	-- 状态/当前路径标签
+	local pathLbl = Instance.new("TextLabel")
+	pathLbl.Size = UDim2.new(1, -5, 0, 22)
+	pathLbl.BackgroundTransparency = 1
+	pathLbl.Text = "路径: " .. fmtPath(CurPath)
+	pathLbl.TextColor3 = Theme.SubText
+	pathLbl.Font = FontMain
+	pathLbl.TextSize = 12
+	pathLbl.TextXAlignment = Enum.TextXAlignment.Left
+	pathLbl.TextWrapped = true
+	pathLbl.LayoutOrder = 1
+	pathLbl.Parent = page
+
+	-- 工具栏
+	local bar = Instance.new("Frame")
+	bar.Size = UDim2.new(1, -5, 0, 32)
+	bar.BackgroundTransparency = 1
+	bar.LayoutOrder = 2
+	local barLayout = Instance.new("UIListLayout")
+	barLayout.FillDirection = Enum.FillDirection.Horizontal
+	barLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	barLayout.Padding = UDim.new(0, 5)
+	barLayout.Parent = bar
+	bar.Parent = page
+
+	-- 工具按钮 (固定宽度, 横向排列)
+	local function toolBtn(text, width, cb, ord)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, width, 0, 30)
+		b.BackgroundColor3 = Theme.Element
+		b.BorderSizePixel = 0
+		b.Text = text
+		b.TextColor3 = Theme.Text
+		b.Font = FontMain
+		b.TextSize = 12
+		b.AutoButtonColor = false
+		b.LayoutOrder = ord
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0, 6)
+		bc.Parent = b
+		trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = Theme.Hover end))
+		trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = Theme.Element end))
+		trackConnection(b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+		b.Parent = bar
+		return b
+	end
+
+	-- 目录工具: 需要先定义导航函数, 再建按钮
+	local function parentDir(dir)
+		local d = dir:gsub("\\\\", "/")
+		return d:match("^(.*)/[^/]+$") or ""
+	end
+	local function joinName(dir, name)
+		if dir == nil or dir == "" then return name end
+		local d = dir:gsub("\\\\", "/")
+		return d .. "/" .. name
+	end
+	enterFolder = function(path)
+		CurPath = path or ""
+		refresh()
+	end
+
+	goRoot = function()
+		CurPath = ""
+		refresh()
+	end
+	goUp = function()
+		CurPath = parentDir(CurPath)
+		refresh()
+	end
+
+	-- 弹窗 (输入/编辑/确认) —— 定义在导航之后, 操作函数之前
+	local function makeOverlay()
+		local dim = Instance.new("Frame")
+		dim.Size = UDim2.new(1, 0, 1, 0)
+		dim.BackgroundColor3 = Color3.new(0, 0, 0)
+		dim.BackgroundTransparency = 0.45
+		dim.BorderSizePixel = 0
+		dim.ZIndex = 50
+		dim.Parent = MainGui
+		return dim
+	end
+
+	local function modalButton(panel, text, x, y, color, hover, cb)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(96, 32)
+		b.Position = UDim2.fromOffset(x, y)
+		b.BackgroundColor3 = color
+		b.BorderSizePixel = 0
+		b.Text = text
+		b.TextColor3 = Theme.Text
+		b.Font = FontBold
+		b.TextSize = 13
+		b.AutoButtonColor = false
+		b.ZIndex = 51
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0, 6)
+		bc.Parent = b
+		trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = hover end))
+		trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = color end))
+		trackConnection(b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+		b.Parent = panel
+		return b
+	end
+
+	-- 输入/编辑弹窗. isMulti=true 时面板加高, 输入框变多行
+	local function showInputModal(title, subTitle, initial, isMulti, onOk)
+		local dim = makeOverlay()
+		local panel = Instance.new("Frame")
+		panel.AnchorPoint = Vector2.new(0.5, 0.5)
+		panel.Position = UDim2.new(0.5, 0, 0.5, -20)
+		panel.Size = UDim2.new(0, 340, 0, isMulti and 300 or 146)
+		panel.BackgroundColor3 = Theme.Window
+		panel.BorderSizePixel = 0
+		panel.ZIndex = 51
+		local pc = Instance.new("UICorner")
+		pc.CornerRadius = UDim.new(0, 10)
+		pc.Parent = panel
+
+		local t = Instance.new("TextLabel")
+		t.Size = UDim2.new(1, -24, 0, 34)
+		t.Position = UDim2.fromOffset(12, 8)
+		t.BackgroundTransparency = 1
+		t.Text = title
+		t.TextColor3 = Theme.Text
+		t.Font = FontBold
+		t.TextSize = 15
+		t.TextXAlignment = Enum.TextXAlignment.Left
+		t.ZIndex = 51
+		t.Parent = panel
+
+		local box = Instance.new("TextBox")
+		box.Size = isMulti and UDim2.new(1, -24, 1, -74) or UDim2.new(1, -24, 0, 38)
+		box.Position = UDim2.fromOffset(12, isMulti and 50 or 56)
+		box.BackgroundColor3 = Theme.Element
+		box.BorderSizePixel = 0
+		box.MultiLine = isMulti
+		box.TextWrapped = true
+		box.ClearTextOnFocus = false
+		box.TextXAlignment = Enum.TextXAlignment.Left
+		box.TextYAlignment = isMulti and Enum.TextYAlignment.Top or Enum.TextYAlignment.Center
+		box.Text = initial or ""
+		box.TextColor3 = Theme.Text
+		box.Font = FontMain
+		box.TextSize = 13
+		box.PlaceholderText = subTitle or ""
+		box.ZIndex = 51
+		local bxc = Instance.new("UICorner")
+		bxc.CornerRadius = UDim.new(0, 6)
+		bxc.Parent = box
+		box.Parent = panel
+
+		local by = isMulti and (260) or (100)
+		modalButton(panel, "取消", 12, by, Theme.Element, Theme.Hover, function()
+			dim:Destroy()
+		end)
+		modalButton(panel, "确定", 232, by, Theme.AccentDark, Theme.Accent, function()
+			local text = box.Text
+			dim:Destroy()
+			onOk(text)
+		end)
+
+		panel.Parent = dim
+		task.spawn(function()
+			pcall(function() box:CaptureFocus() end)
+		end)
+	end
+
+	-- 确认删除弹窗
+	local function showConfirmDelete(title, message, onYes)
+		local dim = makeOverlay()
+		local panel = Instance.new("Frame")
+		panel.AnchorPoint = Vector2.new(0.5, 0.5)
+		panel.Position = UDim2.new(0.5, 0, 0.5, -20)
+		panel.Size = UDim2.new(0, 320, 0, 146)
+		panel.BackgroundColor3 = Theme.Window
+		panel.BorderSizePixel = 0
+		panel.ZIndex = 51
+		local pc = Instance.new("UICorner")
+		pc.CornerRadius = UDim.new(0, 10)
+		pc.Parent = panel
+
+		local t = Instance.new("TextLabel")
+		t.Size = UDim2.new(1, -24, 0, 34)
+		t.Position = UDim2.fromOffset(12, 8)
+		t.BackgroundTransparency = 1
+		t.Text = title
+		t.TextColor3 = Theme.Text
+		t.Font = FontBold
+		t.TextSize = 15
+		t.TextXAlignment = Enum.TextXAlignment.Left
+		t.ZIndex = 51
+		t.Parent = panel
+
+		local msg = Instance.new("TextLabel")
+		msg.Size = UDim2.new(1, -24, 0, 44)
+		msg.Position = UDim2.fromOffset(12, 42)
+		msg.BackgroundTransparency = 1
+		msg.Text = message
+		msg.TextColor3 = Theme.SubText
+		msg.Font = FontMain
+		msg.TextSize = 12
+		msg.TextWrapped = true
+		msg.TextXAlignment = Enum.TextXAlignment.Left
+		msg.TextYAlignment = Enum.TextYAlignment.Top
+		msg.ZIndex = 51
+		msg.Parent = panel
+
+		modalButton(panel, "取消", 12, 100, Theme.Element, Theme.Hover, function()
+			dim:Destroy()
+		end)
+		modalButton(panel, "确定删除", 212, 100, Theme.Red, Color3.fromRGB(200, 110, 130), function()
+			dim:Destroy()
+			onYes()
+		end)
+
+		panel.Parent = dim
+	end
+
+	-- 文件操作
+	refresh = function()
+		-- 清空旧行
+		for _, r in ipairs(Rows) do
+			pcall(function() r:Destroy() end)
+		end
+		Rows = {}
+		pathLbl.Text = "路径: " .. fmtPath(CurPath)
+
+		if not ListOk then
+			local hint = Instance.new("TextLabel")
+			hint.Size = UDim2.new(1, -5, 0, 40)
+			hint.BackgroundTransparency = 1
+			hint.Text = "当前执行器不支持 listfiles，无法浏览文件。\n但仍可尝试新建/编辑(需 writefile/readfile 支持)。"
+			hint.TextColor3 = Theme.SubText
+			hint.Font = FontMain
+			hint.TextSize = 12
+			hint.TextWrapped = true
+			hint.LayoutOrder = 10
+			hint.Parent = page
+			table.insert(Rows, hint)
+			return
+		end
+
+		-- 读目录
+		entries = {folders = {}, files = {}}
+		local ok, res = pcall(_listfiles, CurPath)
+		if ok and type(res) == "table" then
+			for _, p in ipairs(res) do
+				if type(p) == "string" then
+					local name = p:match("[^/\\]+$")
+					if name and name ~= "" and name ~= "." and name ~= ".." then
+						local isFolder = false
+						if _isfolder then
+							local okf, rf = pcall(_isfolder, p)
+							isFolder = okf and rf == true
+						end
+						local e = { name = name, source = p }
+						if isFolder then
+							table.insert(entries.folders, e)
+						else
+							table.insert(entries.files, e)
+						end
+					end
+				end
+			end
+		end
+		table.sort(entries.folders, function(a, b) return a.name < b.name end)
+		table.sort(entries.files, function(a, b) return a.name < b.name end)
+
+		local ord = 10
+		-- 空目录提示
+		if #entries.folders == 0 and #entries.files == 0 then
+			local hint = Instance.new("TextLabel")
+			hint.Size = UDim2.new(1, -5, 0, 34)
+			hint.BackgroundTransparency = 1
+			hint.Text = "(此目录为空)"
+			hint.TextColor3 = Theme.SubText
+			hint.Font = FontMain
+			hint.TextSize = 12
+			hint.TextWrapped = true
+			hint.LayoutOrder = ord
+			hint.Parent = page
+			table.insert(Rows, hint)
+		end
+
+		for _, e in ipairs(entries.folders) do
+			buildRow(e, true, ord)
+			ord = ord + 1
+		end
+		for _, e in ipairs(entries.files) do
+			buildRow(e, false, ord)
+			ord = ord + 1
+		end
+	end
+
+	deleteEntry = function(entry, isFolder)
+		showConfirmDelete(isFolder and "删除文件夹" or "删除文件", "确定要删除「" .. entry.name .. "」吗？\n此操作不可恢复。", function()
+			local okD
+			if isFolder then
+				okD = pcall(function()
+					if _delfolder then
+						_delfolder(entry.source)
+					else
+						_delfile(entry.source)
+					end
+				end)
+			else
+				okD = pcall(_delfile, entry.source)
+			end
+			if okD then
+				showToast("✓ 已删除 " .. entry.name)
+				refresh()
+			else
+				showToast("删除失败 (可能被占用或无权限)")
+			end
+		end)
+	end
+
+	-- ══ 非文本文件检测: 图片/音频/视频等二进制资源不允许用文本编辑器打开 ══
+	local mediaExts = {}
+	for _, e in ipairs({
+		-- 图片
+		"jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif", "ico", "psd",
+		"svg", "heic", "heif", "raw", "dds", "exr",
+		-- 音频
+		"mp3", "wav", "ogg", "flac", "m4a", "aac", "wma", "opus", "aiff", "aif", "mid", "midi",
+		-- 视频
+		"mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpg", "mpeg", "ts",
+		-- 压缩/程序/二进制
+		"zip", "rar", "7z", "gz", "bz2", "tar", "xz",
+		"exe", "dll", "so", "dylib", "bin", "dat", "db", "sqlite", "class", "jar",
+		-- Roblox 二进制资源/模型
+		"rbxl", "rbxm", "mesh",
+	}) do
+		mediaExts[e] = true
+	end
+
+	local function isTextEditable(source)
+		if type(source) ~= "string" or source == "" then return false end
+		local ext = source:match("%.([^%.\\/]+)$")
+		if not ext then return true end
+		ext = ext:lower()
+		return not mediaExts[ext]
+	end
+
+	-- ══ 音频文件检测 + 播放 ══
+	local audioExts = {}
+	for _, e in ipairs({ "mp3", "wav", "flac", "m4a", "aac", "ogg", "wma", "opus", "aiff", "aif", "mid", "midi" }) do
+		audioExts[e] = true
+	end
+	local function isAudioFile(source)
+		if type(source) ~= "string" or source == "" then return false end
+		local ext = (source:match("%.([^%.\\/]+)$") or ""):lower()
+		return audioExts[ext] == true
+	end
+
+	-- ══ 音频播放: 穷举候选函数名 + 扫描全局环境, 兼容各种执行器 ══
+	-- 预置常见音频播放函数名
+	local audioPlayNames = {
+		"playsound", "playsoundid", "playaudio", "playsong", "playmusic", "playmp3",
+		"playfile", "playcg", "playsoundfile", "music", "sound", "audio", "mp3", "song",
+		"playlocal", "playlocalmusic", "playlocalaudio", "playfileaudio", "playsoundlocal",
+		"kugou", "kuwo", "netease", "musiclib", "getmusic", "getaudio", "playmusics",
+	}
+
+	-- 用于匹配全局函数名关键词 (含网易云/酷狗可能的中英文命名)
+	local audioScanKeys = {
+		"play", "music", "song", "audio", "mp3", "sound", "kugou", "kuwo", "netease",
+		"wangyi", "yinyue", "播放", "音乐", "网易", "酷狗", "歌曲", "曲库", "云音乐",
+	}
+
+	local audioCandidates = nil
+	local audioCandNames = nil
+	local function getAudioCandidates()
+		if audioCandidates then return audioCandidates, audioCandNames end
+		local list, names = {}, {}
+		local seen = {}
+		local addIdx = 0
+		local function add(fn, n)
+			if type(fn) == "function" and not seen[fn] then
+				seen[fn] = true
+				addIdx = addIdx + 1
+				table.insert(list, fn)
+				table.insert(names, n or ("候选#" .. addIdx))
+			end
+		end
+
+		-- 1) 预置清单
+		for _, n in ipairs(audioPlayNames) do
+			add(resolveFileFunc(n), n)
+		end
+
+		-- 2) 扫描全局环境, 名称含音频关键词的函数都列为候选
+		local function scan(env)
+			if type(env) ~= "table" then return end
+			local okNext = pcall(next, env)
+			if not okNext then return end
+			for key in pairs(env) do
+				if type(key) == "string" then
+					local kk = key:lower()
+					local hit = false
+					for _, kw in ipairs(audioScanKeys) do
+						if kk:find(kw) then hit = true break end
+					end
+					if hit then
+						local okV, val = pcall(function() return env[key] end)
+						if okV and type(val) == "function" then add(val, key) end
+					end
+				end
+			end
+		end
+		scan(_G)
+		local okEnv, env = pcall(getfenv, 0)
+		if okEnv and env ~= _G then scan(env) end
+
+		audioCandidates, audioCandNames = list, names
+		return list, names
+	end
+
+	-- 当前正在播放的本地音频 (文件管理器) 状态
+	local fmAudioSound = nil
+	local fmAudioName = nil   -- 当前正在处理的文件路径
+	local fmAudioBtn = nil    -- 当前行上的播放按钮实例
+	local fmAudioPaused = false
+	local fmPausedPos = nil
+	local fmStatusLbl = nil   -- 迷你播放条的曲目标签
+	local fmPauseBtn = nil    -- 迷你播放条的暂停/继续按钮
+	local fmProgTrack, fmProgFill, fmProgHandle, fmTimeLbl = nil, nil, nil, nil -- 进度条组件
+	local renderProgress = nil -- 前向声明 (进度条渲染)
+	local fmLoop = false       -- 单曲循环/单次播放
+	local fmLoopBtn = nil      -- 循环开关按钮
+	local toggleAudioPlay     -- 前向声明 (供 toggleFmPause 引用)
+
+	local function fmtTime(s)
+		s = math.max(0, math.floor(s or 0))
+		return ("%d:%02d"):format(math.floor(s / 60), s % 60)
+	end
+
+	local function resetFmAudio()
+		fmAudioSound = nil
+		fmAudioName = nil
+		fmAudioBtn = nil
+		fmAudioPaused = false
+		fmPausedPos = nil
+	end
+
+	-- 依据当前状态刷新迷你播放条
+	local function updateFmBar()
+		if fmStatusLbl then
+			if fmAudioSound and fmAudioName then
+				local nm = fmAudioName:match("[^/\\]+$") or fmAudioName
+				fmStatusLbl.Text = (fmAudioPaused and "⏸ 已暂停: " or "▶ 播放中: ") .. nm
+			else
+				fmStatusLbl.Text = "未在播放"
+			end
+		end
+		if fmPauseBtn then
+			fmPauseBtn.Text = (fmAudioSound and (fmAudioPaused and "继续" or "暂停")) or "播放"
+		end
+		if fmLoopBtn then
+			pcall(function() fmLoopBtn.Text = fmLoop and "🔁 循环" or "单次" end)
+			pcall(function() fmLoopBtn.BackgroundColor3 = fmLoop and Theme.AccentDark or Theme.Element end)
+		end
+		if renderProgress then renderProgress(nil) end
+	end
+
+	local function stopFmAudio()
+		if fmAudioSound then
+			pcall(function() fmAudioSound:Stop() end)
+			pcall(function() fmAudioSound:Destroy() end)
+		end
+		if fmAudioBtn then
+			pcall(function() fmAudioBtn.Text = "▶ 播放" end)
+		end
+		resetFmAudio()
+		updateFmBar()
+	end
+
+	-- 迷你播放条上的暂停/继续
+	local function toggleFmPause()
+		if not fmAudioSound or not fmAudioName then
+			showToast("请先点击某个音频文件的播放按钮")
+			return
+		end
+		toggleAudioPlay({ source = fmAudioName, name = fmAudioName:match("[^/\\]+$") or fmAudioName }, nil)
+	end
+
+	-- 单曲循环 / 单次播放 切换
+	local function toggleFmLoop()
+		fmLoop = not fmLoop
+		if fmAudioSound then
+			pcall(function() fmAudioSound.Looped = fmLoop end)
+		end
+		updateFmBar()
+		showToast(fmLoop and "🔁 已开启单曲循环" or "已切换为单次播放")
+	end
+
+	-- ══ 本地音频播放/暂停切换: 与网易云同款方案(getcustomasset + Sound) ══
+	toggleAudioPlay = function(entry, btn)
+		-- 点的是同一文件且正在播放/已暂停 → 暂停/继续切换
+		if fmAudioSound and fmAudioName == entry.source then
+			if fmAudioPaused then
+				fmAudioSound:Play()
+				if fmPausedPos and fmPausedPos > 0 then
+					pcall(function() fmAudioSound.TimePosition = fmPausedPos end)
+				end
+				fmAudioPaused = false
+				fmPausedPos = nil
+				if fmAudioBtn == btn and btn then btn.Text = "⏸ 暂停" end
+				updateFmBar()
+				showToast("▶ 已继续: " .. entry.name)
+			else
+				fmPausedPos = fmAudioSound.TimePosition or 0
+				fmAudioSound:Pause()
+				fmAudioPaused = true
+				if fmAudioBtn then pcall(function() fmAudioBtn.Text = "▶ 播放" end) end
+				updateFmBar()
+				showToast("⏸ 已暂停: " .. entry.name)
+			end
+			return
+		end
+
+		-- 播放新文件
+		stopFmAudio()
+		fmAudioName = entry.source
+		fmAudioBtn = btn
+
+		local _getcustomasset = getcustomasset or (syn and syn.getcustomasset) or getsynasset or getcustomassetfunc
+		if _getcustomasset then
+			local assetUrl = nil
+			local okAsset = pcall(function() assetUrl = _getcustomasset(entry.source) end)
+			if okAsset and assetUrl and type(assetUrl) == "string" and assetUrl ~= "" then
+				local sound = Instance.new("Sound")
+				sound.SoundId = assetUrl
+				sound.Volume = 1
+				sound.Parent = workspace
+				pcall(function() sound.Looped = fmLoop end)
+				fmAudioSound = sound
+				trackConnection(sound.Ended:Connect(function()
+					if fmAudioSound == sound then
+						if fmAudioBtn then pcall(function() fmAudioBtn.Text = "▶ 播放" end) end
+						resetFmAudio()
+						updateFmBar()
+					end
+				end))
+				local okPlay = pcall(function() sound:Play() end)
+				if okPlay then
+					if btn then btn.Text = "⏸ 暂停" end
+					updateFmBar()
+					showToast("▶ 正在播放: " .. entry.name)
+					return
+				end
+				pcall(function() sound:Destroy() end)
+				resetFmAudio()
+				updateFmBar()
+			end
+		end
+
+		-- 后备: 尝试执行器播放函数
+		local list, names = getAudioCandidates()
+		if #list == 0 then
+			showToast("⚠ 未找到可用的本地音频播放方式")
+			resetFmAudio()
+			updateFmBar()
+			return
+		end
+		for _, fn in ipairs(list) do
+			for _, arg in ipairs({ entry.source, entry.name }) do
+				local ok = pcall(fn, arg)
+				if ok then
+					if btn then btn.Text = "⏸ 暂停" end
+					updateFmBar()
+					showToast("▶ 正在播放: " .. entry.name)
+					return
+				end
+			end
+		end
+		resetFmAudio()
+		updateFmBar()
+		pcall(print, "[音频] 候选播放函数: " .. table.concat(names, ", "))
+		showToast("⚠ 播放失败, 已打印候选函数名\n把它发我即可精确适配")
+	end
+
+	openEditor = function(entry)
+		-- 非文本文件 (图片/音频/视频等) 不允许用文本编辑器打开
+		if not isTextEditable(entry.source) then
+			showToast("⚠ " .. (entry.name or "该文件") .. " 是图片/音频/视频等非文本文件\n无法用文本编辑器打开，可删除或重命名")
+			return
+		end
+
+		-- 单一遮罩自管理: 在同一个遮罩里先显示"加载+取消加载", 读取后再切换为编辑界面.
+		-- 全程用容器切换卡片, 任何异常都销毁遮罩, 绝不残留半黑.
+		local SPIN_SYMS = {"◌", "◒", "◓", "◑", "◐", "●"}
+
+		local dim = makeOverlay()
+		local container = Instance.new("Frame")
+		container.Size = UDim2.new(1, 0, 1, 0)
+		container.BackgroundTransparency = 1
+		container.ZIndex = 60
+		container.Parent = dim
+
+		local card = nil     -- 当前面板
+		local spinCon = nil  -- 转圈动画连接
+
+		local function disposeCard()
+			if card then pcall(function() card:Destroy() end); card = nil end
+			if spinCon then pcall(function() spinCon:Disconnect() end); spinCon = nil end
+		end
+
+		local function closeAll()
+			disposeCard()
+			pcall(function() dim:Destroy() end)
+		end
+
+		local function newCard(h, isFull)
+			if card then disposeCard() end
+			local p = Instance.new("Frame")
+			p.AnchorPoint = Vector2.new(0.5, 0.5)
+			p.Position = UDim2.new(0.5, 0, 0.5, isFull and -8 or -20)
+			p.Size = isFull and UDim2.new(1, -16, 1, -16) or UDim2.new(0, 340, 0, h)
+			p.BackgroundColor3 = Theme.Window
+			p.BorderSizePixel = 0
+			p.ZIndex = 61
+			local pcc = Instance.new("UICorner")
+			pcc.CornerRadius = UDim.new(0, 10)
+			pcc.Parent = p
+			p.Parent = container
+			card = p
+			return p
+		end
+
+		local function cardTitle(p, text)
+			local t = Instance.new("TextLabel")
+			t.Size = UDim2.new(1, -24, 0, 34)
+			t.Position = UDim2.fromOffset(12, 8)
+			t.BackgroundTransparency = 1
+			t.Text = text
+			t.TextColor3 = Theme.Text
+			t.Font = FontBold
+			t.TextSize = 15
+			t.TextXAlignment = Enum.TextXAlignment.Left
+			t.ZIndex = 61
+			t.Parent = p
+			return t
+		end
+
+		local function cardBtn(p, text, pos, w, color, hover, cb)
+			local b = Instance.new("TextButton")
+			b.Size = UDim2.fromOffset(w, 32)
+			b.Position = pos
+			b.BackgroundColor3 = color
+			b.BorderSizePixel = 0
+			b.Text = text
+			b.TextColor3 = Theme.Text
+			b.Font = FontBold
+			b.TextSize = 13
+			b.AutoButtonColor = false
+			b.ZIndex = 62
+			local bcc = Instance.new("UICorner")
+			bcc.CornerRadius = UDim.new(0, 6)
+			bcc.Parent = b
+			trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = hover end))
+			trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = color end))
+			trackConnection(b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+			b.Parent = p
+			return b
+		end
+
+		-- ① 加载界面 (带"取消加载")
+		local loadCard = newCard(172)
+		cardTitle(loadCard, "正在加载文件...")
+		local lf = Instance.new("TextLabel")
+		lf.Size = UDim2.new(1, -24, 0, 46)
+		lf.Position = UDim2.fromOffset(12, 44)
+		lf.BackgroundTransparency = 1
+		lf.Text = entry.source or entry.name
+		lf.TextColor3 = Theme.SubText
+		lf.Font = FontMain
+		lf.TextSize = 12
+		lf.TextTruncate = Enum.TextTruncate.AtEnd
+		lf.TextXAlignment = Enum.TextXAlignment.Left
+		lf.TextYAlignment = Enum.TextYAlignment.Top
+		lf.ZIndex = 61
+		lf.Parent = loadCard
+		local spinner = Instance.new("TextLabel")
+		spinner.Size = UDim2.new(0, 26, 0, 26)
+		spinner.Position = UDim2.fromOffset(12, 108)
+		spinner.BackgroundTransparency = 1
+		spinner.Text = "◌"
+		spinner.TextColor3 = Theme.Accent
+		spinner.Font = FontMain
+		spinner.TextSize = 20
+		spinner.ZIndex = 61
+		spinner.Parent = loadCard
+		local lt = Instance.new("TextLabel")
+		lt.Size = UDim2.new(1, -24, 0, 20)
+		lt.Position = UDim2.fromOffset(12, 140)
+		lt.BackgroundTransparency = 1
+		lt.Text = "可点击「取消加载」放弃打开"
+		lt.TextColor3 = Theme.SubText
+		lt.Font = FontMain
+		lt.TextSize = 11
+		lt.TextXAlignment = Enum.TextXAlignment.Left
+		lt.ZIndex = 61
+		lt.Parent = loadCard
+		local lTick = 0
+		spinCon = RunService.Heartbeat:Connect(function()
+			lTick = lTick + 1
+			spinner.Text = SPIN_SYMS[(lTick % #SPIN_SYMS) + 1]
+		end)
+		trackConnection(spinCon)
+
+		local cancelled = false
+		cardBtn(loadCard, "取消加载", UDim2.new(0, 224, 0, 106), 96, Theme.Element, Theme.Hover, function()
+			cancelled = true
+			closeAll()
+		end)
+
+		-- ② 读取完成 -> 同一遮罩内切换为编辑界面
+		task.spawn(function()
+			local content
+			local okOk = pcall(function()
+				task.wait(0.02)
+				content = safeReadFile(entry.source) or ""
+			end)
+			if cancelled then return end
+			if not okOk then
+				closeAll()
+				showToast("读取文件失败")
+				return
+			end
+			disposeCard()
+			local eCard = newCard(0, true) -- 几乎占满全屏
+			cardTitle(eCard, "编辑文件: " .. (entry.name or ""))
+			local fpath = Instance.new("TextLabel")
+			fpath.Size = UDim2.new(1, -32, 0, 20)
+			fpath.Position = UDim2.new(0, 16, 0, 46)
+			fpath.BackgroundTransparency = 1
+			fpath.Text = entry.source or ""
+			fpath.TextColor3 = Theme.SubText
+			fpath.Font = FontMain
+			fpath.TextSize = 12
+			fpath.TextTruncate = Enum.TextTruncate.AtEnd
+			fpath.TextXAlignment = Enum.TextXAlignment.Left
+			fpath.ZIndex = 61
+			fpath.Parent = eCard
+			local box = Instance.new("TextBox")
+			box.Size = UDim2.new(1, -32, 1, -118)
+			box.Position = UDim2.new(0, 16, 0, 74)
+			box.BackgroundColor3 = Theme.Element
+			box.BorderSizePixel = 0
+			box.MultiLine = true
+			box.TextWrapped = true
+			box.ClearTextOnFocus = false
+			box.TextXAlignment = Enum.TextXAlignment.Left
+			box.TextYAlignment = Enum.TextYAlignment.Top
+			box.Text = content or ""
+			box.TextColor3 = Theme.Text
+			box.Font = FontMain
+			box.TextSize = 14
+			box.ZIndex = 61
+			local bxc = Instance.new("UICorner")
+			bxc.CornerRadius = UDim.new(0, 6)
+			bxc.Parent = box
+			box.Parent = eCard
+			cardBtn(eCard, "取消", UDim2.new(0, 16, 1, -44), 96, Theme.Element, Theme.Hover, function()
+				closeAll()
+			end)
+			cardBtn(eCard, "保存", UDim2.new(1, -108, 1, -44), 96, Theme.AccentDark, Theme.Accent, function()
+				local text = box.Text
+				closeAll()
+				local okW, errW = safeWriteFile(entry.source, text)
+				if okW then
+					showToast("✓ 已保存 " .. entry.name)
+				else
+					showToast("保存失败: " .. tostring(errW))
+				end
+			end)
+			task.spawn(function()
+				pcall(function() box:CaptureFocus() end)
+			end)
+		end)
+	end
+
+	renameFile = function(entry)
+		showInputModal("重命名", "新文件名", entry.name, false, function(newName)
+			newName = (newName or ""):match("^%s*(.-)%s*$")
+			if newName == "" then
+				showToast("文件名不能为空")
+				return
+			end
+			local target = joinName(parentDir(entry.source), newName)
+			local content = safeReadFile(entry.source)
+			local okW, errW = safeWriteFile(target, content or "")
+			if okW then
+				pcall(_delfile, entry.source)
+				showToast("✓ 已重命名为 " .. newName)
+				refresh()
+			else
+				showToast("重命名失败: " .. tostring(errW))
+			end
+		end)
+	end
+
+	newFileUI = function()
+		showInputModal("新建文件", "文件名 (可含子目录)", "", false, function(name)
+			name = (name or ""):match("^%s*(.-)%s*$")
+			if name == "" then
+				showToast("文件名不能为空")
+				return
+			end
+			local okW, errW = safeWriteFile(joinName(CurPath, name), "")
+			if okW then
+				showToast("✓ 已创建 " .. name)
+				refresh()
+			else
+				showToast("创建失败: " .. tostring(errW))
+			end
+		end)
+	end
+
+	newFolderUI = function()
+		showInputModal("新建文件夹", "文件夹名", "", false, function(name)
+			name = (name or ""):match("^%s*(.-)%s*$")
+			if name == "" then
+				showToast("文件夹名不能为空")
+				return
+			end
+			local okF, errF = pcall(_makefolder, joinName(CurPath, name))
+			if okF then
+				showToast("✓ 已创建文件夹 " .. name)
+				refresh()
+			else
+				showToast("创建失败: " .. tostring(errF))
+			end
+		end)
+	end
+
+	-- 操作按钮 (行内右侧)
+	actBtn = function(row, label, index, total, color, hover, cb)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(56, 24)
+		b.Position = UDim2.new(1, -((total - index + 1) * 56 + 4), 0.5, -12)
+		b.BackgroundColor3 = color
+		b.BorderSizePixel = 0
+		b.Text = label
+		b.TextColor3 = Theme.Text
+		b.Font = FontBold
+		b.TextSize = 11
+		b.AutoButtonColor = false
+		b.ZIndex = 10
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0, 5)
+		bc.Parent = b
+		trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = hover end))
+		trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = color end))
+		trackConnection(b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+		b.Parent = row
+		return b
+	end
+
+	buildRow = function(entry, isFolder, ord)
+		local textable = not isFolder and isTextEditable(entry.source)
+		local audio = not isFolder and isAudioFile(entry.source)
+		local total = isFolder and 1 or (audio and 3 or (textable and 3 or 2))
+		local nameW = total * 56 + 16
+
+		local row = Instance.new("TextButton")
+		row.Size = UDim2.new(1, -5, 0, 38)
+		row.BackgroundColor3 = Theme.Element
+		row.BorderSizePixel = 0
+		row.AutoButtonColor = false
+		row.LayoutOrder = ord
+		row.ZIndex = 2
+		local rc = Instance.new("UICorner")
+		rc.CornerRadius = UDim.new(0, 6)
+		rc.Parent = row
+
+		local nm = Instance.new("TextLabel")
+		nm.Size = UDim2.new(1, -nameW, 1, 0)
+		nm.Position = UDim2.fromOffset(10, 0)
+		nm.BackgroundTransparency = 1
+		local icon = isFolder and "📁 " or (audio and "🎵 " or (textable and "📄 " or "📦 "))
+		nm.Text = icon .. entry.name
+		nm.TextColor3 = isFolder and Theme.Green or (audio and Theme.Accent or Theme.Text)
+		nm.Font = FontMain
+		nm.TextSize = 13
+		nm.TextXAlignment = Enum.TextXAlignment.Left
+		nm.TextTruncate = Enum.TextTruncate.AtEnd
+		nm.ZIndex = 3
+		nm.Parent = row
+
+		-- 点行: 进入文件夹 / 打开文件 (非文本文件不可文本编辑, 仅提示)
+		local clickAction
+		if isFolder then
+			clickAction = function() enterFolder(entry.source) end
+		elseif audio then
+			clickAction = function() toggleAudioPlay(entry, nil) end
+		elseif not textable then
+			clickAction = function() showToast("⚠ " .. (entry.name or "该文件") .. " 是图片/音频/视频等非文本文件\n无法用文本编辑器打开，可删除或重命名") end
+		else
+			clickAction = function() openEditor(entry) end
+		end
+		trackConnection(row.MouseButton1Click:Connect(function() task.spawn(clickAction) end))
+		trackConnection(row.MouseEnter:Connect(function() row.BackgroundColor3 = Theme.Hover end))
+		trackConnection(row.MouseLeave:Connect(function() row.BackgroundColor3 = Theme.Element end))
+
+		if isFolder then
+			actBtn(row, "删除", 1, 1, Theme.Red, Color3.fromRGB(200, 110, 130), function() deleteEntry(entry, true) end)
+		elseif audio then
+			local pb = actBtn(row, "▶ 播放", 1, 3, Color3.fromRGB(39, 174, 96), Color3.fromRGB(61, 220, 132), function() toggleAudioPlay(entry, pb) end)
+			actBtn(row, "重命名", 2, 3, Theme.Element, Theme.Hover, function() renameFile(entry) end)
+			actBtn(row, "删除", 3, 3, Theme.Red, Color3.fromRGB(200, 110, 130), function() deleteEntry(entry, false) end)
+		elseif not textable then
+			actBtn(row, "重命名", 1, 2, Theme.Element, Theme.Hover, function() renameFile(entry) end)
+			actBtn(row, "删除", 2, 2, Theme.Red, Color3.fromRGB(200, 110, 130), function() deleteEntry(entry, false) end)
+		else
+			actBtn(row, "编辑", 1, 3, Theme.AccentDark, Theme.Accent, function() openEditor(entry) end)
+			actBtn(row, "重命名", 2, 3, Theme.Element, Theme.Hover, function() renameFile(entry) end)
+			actBtn(row, "删除", 3, 3, Theme.Red, Color3.fromRGB(200, 110, 130), function() deleteEntry(entry, false) end)
+		end
+
+		row.Parent = page
+		table.insert(Rows, row)
+	end
+
+	-- 工具栏按钮 (在函数都已定义后创建)
+	local btnOrder = 1
+	toolBtn("根目录", 64, goRoot, btnOrder); btnOrder = btnOrder + 1
+	toolBtn("上级", 48, goUp, btnOrder); btnOrder = btnOrder + 1
+	toolBtn("刷新", 48, refresh, btnOrder); btnOrder = btnOrder + 1
+	toolBtn("新建文件", 76, newFileUI, btnOrder); btnOrder = btnOrder + 1
+	toolBtn("新建目录", 76, newFolderUI, btnOrder); btnOrder = btnOrder + 1
+
+	-- ══ 音乐进度条 (可拖动 seek) ══
+	local progRow = Instance.new("Frame")
+	progRow.Size = UDim2.new(1, -5, 0, 18)
+	progRow.BackgroundTransparency = 1
+	progRow.LayoutOrder = 3
+	local progLayout = Instance.new("UIListLayout")
+	progLayout.FillDirection = Enum.FillDirection.Horizontal
+	progLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	progLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	progLayout.Padding = UDim.new(0, 6)
+	progLayout.Parent = progRow
+	progRow.Parent = page
+
+	fmProgTrack = Instance.new("TextButton")
+	fmProgTrack.Size = UDim2.new(1, -70, 0, 10)
+	fmProgTrack.BackgroundColor3 = Color3.fromRGB(45, 50, 56)
+	fmProgTrack.BorderSizePixel = 0
+	fmProgTrack.Text = ""
+	fmProgTrack.AutoButtonColor = false
+	fmProgTrack.LayoutOrder = 1
+	fmProgTrack.ZIndex = 5
+	local tkCorner = Instance.new("UICorner")
+	tkCorner.CornerRadius = UDim.new(1, 0)
+	tkCorner.Parent = fmProgTrack
+
+	fmProgFill = Instance.new("Frame")
+	fmProgFill.Size = UDim2.new(0, 0, 1, 0)
+	fmProgFill.BackgroundColor3 = Theme.Accent
+	fmProgFill.BorderSizePixel = 0
+	fmProgFill.ZIndex = 6
+	local flCorner = Instance.new("UICorner")
+	flCorner.CornerRadius = UDim.new(1, 0)
+	flCorner.Parent = fmProgFill
+
+	fmProgHandle = Instance.new("TextButton")
+	fmProgHandle.Size = UDim2.new(0, 14, 0, 14)
+	fmProgHandle.AnchorPoint = Vector2.new(0.5, 0.5)
+	fmProgHandle.Position = UDim2.new(0, -0, 0.5, 0)
+	fmProgHandle.BackgroundColor3 = Color3.new(1, 1, 1)
+	fmProgHandle.BorderSizePixel = 0
+	fmProgHandle.Text = ""
+	fmProgHandle.AutoButtonColor = false
+	fmProgHandle.ZIndex = 7
+	local hdCorner = Instance.new("UICorner")
+	hdCorner.CornerRadius = UDim.new(1, 0)
+	hdCorner.Parent = fmProgHandle
+
+	fmProgFill.Parent = fmProgTrack
+	fmProgHandle.Parent = fmProgTrack
+	fmProgTrack.Parent = progRow
+
+	fmTimeLbl = Instance.new("TextLabel")
+	fmTimeLbl.Size = UDim2.new(0, 64, 0, 14)
+	fmTimeLbl.BackgroundTransparency = 1
+	fmTimeLbl.Text = "0:00 / 0:00"
+	fmTimeLbl.TextColor3 = Theme.SubText
+	fmTimeLbl.Font = FontMain
+	fmTimeLbl.TextSize = 11
+	fmTimeLbl.TextXAlignment = Enum.TextXAlignment.Center
+	fmTimeLbl.LayoutOrder = 2
+	fmTimeLbl.Parent = progRow
+
+	-- 渲染进度条 (via==nil 时按当前播放位置计算)
+	renderProgress = function(via)
+		local ratio = 0
+		if via == nil then
+			if fmAudioSound then
+				local tlen = fmAudioSound.TimeLength or 0
+				local tpos = fmAudioSound.TimePosition or 0
+				ratio = (tlen > 0 and tpos > 0) and math.clamp(tpos / tlen, 0, 1) or 0
+			end
+		else
+			ratio = math.clamp(via, 0, 1)
+		end
+		if fmProgFill then fmProgFill.Size = UDim2.new(ratio, 0, 1, 0) end
+		if fmProgHandle then fmProgHandle.Position = UDim2.new(ratio, 0, 0.5, 0) end
+		if fmTimeLbl then
+			local pos, len = 0, 0
+			if fmAudioSound then
+				pos = fmAudioSound.TimePosition or 0
+				len = fmAudioSound.TimeLength or 0
+			end
+			fmTimeLbl.Text = fmtTime(pos) .. " / " .. fmtTime(len)
+		end
+	end
+
+	-- 拖动/点击 seek
+	local seekActive = false
+	local function setSeekFrom(mx)
+		if not fmAudioSound then return end
+		local abs = fmProgTrack.AbsolutePosition
+		local w = fmProgTrack.AbsoluteSize.X
+		if w <= 0 then return end
+		local via = math.clamp((mx - abs.X) / w, 0, 1)
+		local tlen = fmAudioSound.TimeLength or 0
+		if tlen > 0 then
+			pcall(function() fmAudioSound.TimePosition = via * tlen end)
+			renderProgress(via)
+		end
+	end
+	trackConnection(fmProgTrack.MouseButton1Down:Connect(function()
+		seekActive = true
+		setSeekFrom(UserInputService:GetMouseLocation().X)
+	end))
+	trackConnection(UserInputService.InputBegan:Connect(function(input, gpe)
+		if gpe then return end
+		if input.UserInputType == Enum.UserInputType.Touch then
+			local p = input.Position
+			local abs = fmProgTrack.AbsolutePosition
+			local sz = fmProgTrack.AbsoluteSize
+			if p.X >= abs.X - 10 and p.X <= abs.X + sz.X + 10 then
+				seekActive = true
+				setSeekFrom(p.X)
+			end
+		end
+	end))
+	trackConnection(UserInputService.InputChanged:Connect(function(input, gpe)
+		if gpe or not seekActive then return end
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			setSeekFrom(input.Position.X)
+		end
+	end))
+	trackConnection(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			seekActive = false
+		end
+	end))
+
+	-- 播放中每帧更新进度
+	trackConnection(RunService.Heartbeat:Connect(function()
+		if not seekActive and fmAudioSound and not fmAudioPaused then
+			if renderProgress then renderProgress(nil) end
+		end
+	end))
+
+	-- ══ 迷你播放条 (常驻, 便于暂停/继续) ══
+	local fbar = Instance.new("Frame")
+	fbar.Size = UDim2.new(1, -5, 0, 30)
+	fbar.BackgroundColor3 = Theme.Element
+	fbar.BorderSizePixel = 0
+	fbar.LayoutOrder = 4
+	local fbc = Instance.new("UICorner")
+	fbc.CornerRadius = UDim.new(0, 6)
+	fbc.Parent = fbar
+	local fbarLayout = Instance.new("UIListLayout")
+	fbarLayout.FillDirection = Enum.FillDirection.Horizontal
+	fbarLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+	fbarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	fbarLayout.Padding = UDim.new(0, 6)
+	fbarLayout.Parent = fbar
+	fbar.Parent = page
+
+	fmStatusLbl = Instance.new("TextLabel")
+	fmStatusLbl.Size = UDim2.new(1, -152, 1, 0)
+	fmStatusLbl.BackgroundTransparency = 1
+	fmStatusLbl.Text = "未在播放"
+	fmStatusLbl.TextColor3 = Theme.Text
+	fmStatusLbl.Font = FontMain
+	fmStatusLbl.TextSize = 12
+	fmStatusLbl.TextXAlignment = Enum.TextXAlignment.Left
+	fmStatusLbl.TextTruncate = Enum.TextTruncate.AtEnd
+	fmStatusLbl.LayoutOrder = 1
+	fmStatusLbl.Parent = fbar
+
+	local function miniBtn(txt, order, color, hover, cb)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(0, 64, 0, 24)
+		b.BackgroundColor3 = color
+		b.BorderSizePixel = 0
+		b.Text = txt
+		b.TextColor3 = Theme.Text
+		b.Font = FontBold
+		b.TextSize = 12
+		b.AutoButtonColor = false
+		b.LayoutOrder = order
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0, 5)
+		bc.Parent = b
+		trackConnection(b.MouseEnter:Connect(function() b.BackgroundColor3 = hover end))
+		trackConnection(b.MouseLeave:Connect(function() b.BackgroundColor3 = color end))
+		trackConnection(b.MouseButton1Click:Connect(function() task.spawn(cb) end))
+		b.Parent = fbar
+		return b
+	end
+	fmPauseBtn = miniBtn("播放", 2, Theme.AccentDark, Theme.Accent, toggleFmPause)
+	fmLoopBtn = Instance.new("TextButton")
+	fmLoopBtn.Size = UDim2.new(0, 64, 0, 24)
+	fmLoopBtn.BackgroundColor3 = Theme.Element
+	fmLoopBtn.BorderSizePixel = 0
+	fmLoopBtn.Text = "单次"
+	fmLoopBtn.TextColor3 = Theme.Text
+	fmLoopBtn.Font = FontBold
+	fmLoopBtn.TextSize = 12
+	fmLoopBtn.AutoButtonColor = false
+	fmLoopBtn.LayoutOrder = 3
+	local lbc = Instance.new("UICorner")
+	lbc.CornerRadius = UDim.new(0, 5)
+	lbc.Parent = fmLoopBtn
+	trackConnection(fmLoopBtn.MouseEnter:Connect(function() fmLoopBtn.BackgroundColor3 = Color3.fromRGB(90, 110, 140) end))
+	trackConnection(fmLoopBtn.MouseLeave:Connect(function() fmLoopBtn.BackgroundColor3 = fmLoop and Theme.AccentDark or Theme.Element end))
+	trackConnection(fmLoopBtn.MouseButton1Click:Connect(function() task.spawn(toggleFmLoop) end))
+	fmLoopBtn.Parent = fbar
+	updateFmBar()
+
+	-- 初次加载
+	if type(buildRow) == "function" then
+		refresh()
+	else
+		showToast("文件页初始化异常: 内部函数未注册 (buildRow=nil)\n此执行器可能对超大脚本分段加载失败")
+	end
+end
+-- 兜底: IIFE 隔离, 避免挤占顶层局部寄存器; 即使文件页出错也不拖垮其余 GUI
+; (function()
+	local fmOk, fmErr = pcall(fileManagerScope)
+	if not fmOk then showToast("文件管理页加载失败: " .. tostring(fmErr)) end
+end)();
+
+-- 尾段 (标签排序/窗口状态/动画/关闭清理/初始化) — IIFE 隔离, 避免挤占主脚本局部变量上限
+(function()
 -- 将开山标签移动到设置标签前面 (交换两者的 LayoutOrder)
 do
 	local ksTab = Tabs["开山"]
@@ -8035,4 +9842,7 @@ if autoLoadName and autoLoadName ~= "" then
 		showToast("已自动加载配置: " .. autoLoadName)
 	end)
 end
-print("[GSEN辅助 V177] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方 | 幸运值多源解析 | 全品质过滤(9档) | 深度调试日志 | 删除配置二次确认弹窗 | 跳服移至开山页末尾 | initKaishan异常保护 | 聊天翻译支持Global频道 | Remotes文件夹查找缓存(其他游戏快速初始化) | UniverseId条件加载(非开采一座山跳过开山模块) | 幸运值=基础幸运×变异倍率(方法1-5全部乘变异倍率) | 修复金钱农场/巨石农场人物无法移动(滑翔AlignOrientation属性错误ReactionForceEnabled→ReactionTorqueEnabled) | 重复执行脚本时清理旧GUI(防旧实例残留导致修改不生效) | 删除重复拖拽缩放代码 | 右下角缩放把手:纯空心圆角正方形(UIStroke白色半透明1.2px描边,圆角6px,32×32) | 缩放把手正方形改为溢出窗口显示(handle挂到MainGui,不受Window.ClipsDescendants裁切,监听Window的Size/Position变化实时跟随窗口右下角) | 缩放把手可见性跟随悬浮窗(handle挂到MainGui后不受Window.Visible传播,监听GetPropertyChangedSignal事件隐藏菜单时正方形同步隐藏) | 修复V149版本号print字符串内嵌英文双引号导致的编译期语法错误(无报错但脚本全部不执行) | 标签栏滚动框垂直缩短:底部留出约50px) | 标签栏下方留白添加玩家头像(圆形带描边,靠左) | 头像右侧昵称在上/用户名在下(字号颜色区分) | 点击头像弹出关于弹窗(复用设置页关于) | 移除设置页关于按钮(入口移至头像点击) | 修复关于弹窗内容溢出(改为手动跟随内容高度的滚动框,面板加高可滚动查看全部) | 开山页新增自动跳服开关(重进当前服下方,ESP计数为0持续12秒自动随机切服,90秒冷却) | 自动跳服改为独立监控(不依赖水晶ESP,遍历水晶容器判定合格矿石,连续25秒无合格即切服,90秒冷却) | 自动跳服冷却改为20秒) | 去掉连续判定阈值(5秒扫一次,无合格矿石直接跳房,跳后20秒冷却) | 去掉跳房冷却(每5秒无合格矿石即跳房) | 设置页新增自动加载配置(下拉选择配置或关闭,下次脚本执行自动加载所选配置) | 修复最小价值未注册ConfigControls导致不被配置保存(补注册ks_minValue,与重量/幸运一致) | 修复金钱农场/巨石农场开关状态不被保存(setActive同步KS_Config.moneyFarmActive与KS_Config.autoFarmBoulders) | 传送页新增坐标传送(X/Y/Z输入,填入当前位置,传送按钮,瞬移HRP,坐标传送置顶于传送页第一个小标题,坐标传送下新增保存当前坐标与选择坐标加载(命名为savedPositions.json持久化,选择后自动填入X/Y/Z) | 跳跃高度改为独立开关控制(开关开启应用高度,关闭恢复默认7.2) | 修复跳高无效:此游戏为自旋锚定系统,跳跃由脚本JUMP_POWER手动控制,改为跳起初速度按jumpMult倍率倍增,开关关闭时倍率=1) | 跳跃高度滑块改为倍率显示(范围1-10倍,默认2=2倍跳高,明确可见;原默认7对应1倍故无感))")
+print("[GSEN辅助 V177] 已加载 — 右 Ctrl 切换菜单 | 概率锁头 | 酷狗 + 网易云(VIP) | 音乐缓存清理 | 开山模块集成(⛰️ESP/农场/拾取/跳服) | 水晶品质+重量+幸运过滤(ESP+拾取) | 重量单位改为t | 开山配置持久化 | IIFE隔离局部变量 | 高亮框跟随滚动裁切 | Sidebar圆角去描边 | 开山标签移至设置上方 | 幸运值多源解析 | 全品质过滤(9档) | 深度调试日志 | 删除配置二次确认弹窗 | 跳服移至开山页末尾 | initKaishan异常保护 | 聊天翻译支持Global频道 | Remotes文件夹查找缓存(其他游戏快速初始化) | UniverseId条件加载(非开采一座山跳过开山模块) | 幸运值=基础幸运×变异倍率(方法1-5全部乘变异倍率) | 修复金钱农场/巨石农场人物无法移动(滑翔AlignOrientation属性错误ReactionForceEnabled→ReactionTorqueEnabled) | 重复执行脚本时清理旧GUI(防旧实例残留导致修改不生效) | 删除重复拖拽缩放代码 | 右下角缩放把手:纯空心圆角正方形(UIStroke白色半透明1.2px描边,圆角6px,32×32) | 缩放把手正方形改为溢出窗口显示(handle挂到MainGui,不受Window.ClipsDescendants裁切,监听Window的Size/Position变化实时跟随窗口右下角) | 缩放把手可见性跟随悬浮窗(handle挂到MainGui后不受Window.Visible传播,监听GetPropertyChangedSignal事件隐藏菜单时正方形同步隐藏) | 修复V149版本号print字符串内嵌英文双引号导致的编译期语法错误(无报错但脚本全部不执行) | 标签栏滚动框垂直缩短:底部留出约50px) | 标签栏下方留白添加玩家头像(圆形带描边,靠左) | 头像右侧昵称在上/用户名在下(字号颜色区分) | 点击头像弹出关于弹窗(复用设置页关于) | 移除设置页关于按钮(入口移至头像点击) | 修复关于弹窗内容溢出(改为手动跟随内容高度的滚动框,面板加高可滚动查看全部) | 开山页新增自动跳服开关(重进当前服下方,ESP计数为0持续12秒自动随机切服,90秒冷却) | 自动跳服改为独立监控(不依赖水晶ESP,遍历水晶容器判定合格矿石,连续25秒无合格即切服,90秒冷却) | 自动跳服冷却改为20秒) | 去掉连续判定阈值(5秒扫一次,无合格矿石直接跳房,跳后20秒冷却) | 去掉跳房冷却(每5秒无合格矿石即跳房) | 设置页新增自动加载配置(下拉选择配置或关闭,下次脚本执行自动加载所选配置) | 修复最小价值未注册ConfigControls导致不被配置保存(补注册ks_minValue,与重量/幸运一致) | 修复金钱农场/巨石农场开关状态不被保存(setActive同步KS_Config.moneyFarmActive与KS_Config.autoFarmBoulders) | 传送页新增坐标传送(X/Y/Z输入,填入当前位置,传送按钮,瞬移HRP,坐标传送置顶于传送页第一个小标题,坐标传送下新增保存当前坐标与选择坐标加载(命名为savedPositions.json持久化,选择后自动填入X/Y/Z) | 跳跃高度改为独立开关控制(开关开启应用高度,关闭恢复默认7.2) | 修复跳高无效:此游戏为自旋锚定系统,跳跃由脚本JUMP_POWER手动控制,改为跳起初速度按jumpMult倍率倍增,开关关闭时倍率=1) | 跳跃高度滑块改为倍率显示(范围1-10倍,默认2=2倍跳高,明确可见;原默认7对应1倍故无感) | 通用页摄像机小标题下新增运动相机开关(第三人称运动相机) | 运动相机下新增平滑度(0.01-1,默认0.1)与最大距离(0-200,默认50)滑动条 | 修复下载/交互/配置/开山局部变量寄存器超限(独立作用域隔离) | 修复配置区优化后readAutoSelection/saveAutoSelection变成nil导致的attempt to call a nil value)")
+
+
+end)()
