@@ -4574,6 +4574,312 @@ do
 			end
 		end))
 	end)()
+
+	--============== 黑洞 (BW源码) ==============
+	makeSectionLabel(page, "黑洞");
+	(function()
+		local bh_resp = 200      -- 吸力 (AlignPosition.Responsiveness)
+		local bh_active = false
+		local bh_conn = nil      -- RenderStepped 锚点跟随
+		local bh_da_conn = nil   -- DescendantAdded 持续吸附
+		local bh_folder = nil    -- BW_BH_F 文件夹
+		local bh_anchor = nil    -- BW_BH_A 锚点零件
+		local bh_att = nil       -- BW_BH_ATT 锚点 Attachment
+		local bh_target = nil   -- 目标玩家
+		local bhTargetName = "" -- 输入框记录的目标名 (空 = 自己)
+
+		-- ===== BW 原版: 对零件施加吸附 =====
+		local function bh_force(v)
+			if not v:IsA("BasePart") then return end
+			if v.Anchored then return end
+			if v.Name == "Handle" then return end
+			local par = v.Parent
+			if not par then return end
+			if par:FindFirstChildOfClass("Humanoid") or par:FindFirstChild("Head") then return end
+			pcall(function()
+				for _, x in pairs(v:GetChildren()) do
+					if x:IsA("BodyMover") or x:IsA("RocketPropulsion") then x:Destroy() end
+				end
+				for _, nm in pairs({"Attachment", "AlignPosition", "Torque", "BW_BH_ATT", "BW_BH_AP", "BW_BH_TQ"}) do
+					local e = v:FindFirstChild(nm)
+					if e then e:Destroy() end
+				end
+				v.CanCollide = false
+				local a2 = Instance.new("Attachment")
+				a2.Name = "BW_BH_ATT"
+				a2.Parent = v
+				local tq = Instance.new("Torque")
+				tq.Name = "BW_BH_TQ"
+				tq.Torque = Vector3.new(100000, 100000, 100000)
+				tq.Attachment0 = a2
+				tq.Parent = v
+				local ap = Instance.new("AlignPosition")
+				ap.Name = "BW_BH_AP"
+				ap.MaxForce = math.huge
+				ap.MaxVelocity = math.huge
+				ap.Responsiveness = bh_resp
+				ap.Attachment0 = a2
+				ap.Attachment1 = bh_att
+				ap.Parent = v
+			end)
+		end
+
+		-- ===== BW 原版: 开启黑洞 =====
+		local function start_bh(tgt)
+			bh_active = true
+			bh_target = tgt
+			pcall(function() LocalPlayer.ReplicationFocus = Workspace end)
+			pcall(function() LocalPlayer.SimulationRadius = 1e9 end)
+			if sethiddenproperty then
+				pcall(function() sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 1e9) end)
+				pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", 1e9) end)
+			end
+			pcall(function() if setsimulationradius then setsimulationradius(LocalPlayer, 1e9) end end)
+			pcall(function() LocalPlayer.MaxSimulationRadius = 1e9 end)
+			task.spawn(function()
+				while bh_active do
+					pcall(function() LocalPlayer.ReplicationFocus = Workspace end)
+					pcall(function() LocalPlayer.SimulationRadius = 1e9 end)
+					if sethiddenproperty then
+						pcall(function() sethiddenproperty(LocalPlayer, "MaxSimulationRadius", 1e9) end)
+						pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", 1e9) end)
+					end
+					pcall(function() if setsimulationradius then setsimulationradius(LocalPlayer, 1e9) end end)
+					pcall(function() LocalPlayer.MaxSimulationRadius = 1e9 end)
+					task.wait(1)
+				end
+			end)
+			bh_folder = Instance.new("Folder")
+			bh_folder.Name = "BW_BH_F"
+			bh_folder.Parent = Workspace
+			bh_anchor = Instance.new("Part")
+			bh_anchor.Name = "BW_BH_A"
+			bh_anchor.Anchored = true
+			bh_anchor.CanCollide = false
+			bh_anchor.Transparency = 1
+			bh_anchor.Size = Vector3.new(1, 1, 1)
+			bh_anchor.Parent = bh_folder
+			bh_att = Instance.new("Attachment")
+			bh_att.Name = "BW_BH_ATT"
+			bh_att.Parent = bh_anchor
+			local c0 = bh_target.Character
+			local h0 = c0 and c0:FindFirstChild("HumanoidRootPart")
+			if h0 then bh_anchor.CFrame = h0.CFrame end
+			task.spawn(function()
+				for _, v in pairs(Workspace:GetDescendants()) do
+					if not bh_active then break end
+					bh_force(v)
+				end
+			end)
+			bh_da_conn = trackConnection(Workspace.DescendantAdded:Connect(function(v)
+				if bh_active then bh_force(v) end
+			end))
+			bh_conn = trackConnection(RunService.RenderStepped:Connect(function()
+				if not bh_active or not bh_anchor then return end
+				local t = bh_target
+				if not t or not t.Parent then t = LocalPlayer end
+				local tc = t.Character
+				local th = tc and tc:FindFirstChild("HumanoidRootPart")
+				if th then bh_anchor.CFrame = th.CFrame end
+			end))
+		end
+
+		-- ===== BW 原版: 停止黑洞 =====
+		local function stop_bh()
+			bh_active = false
+			if bh_conn then pcall(function() bh_conn:Disconnect() end) bh_conn = nil end
+			if bh_da_conn then pcall(function() bh_da_conn:Disconnect() end) bh_da_conn = nil end
+			pcall(function()
+				for _, v in pairs(Workspace:GetDescendants()) do
+					if v:IsA("BasePart") then
+						for _, nm in pairs({"BW_BH_ATT", "BW_BH_AP", "BW_BH_TQ"}) do
+							local e = v:FindFirstChild(nm)
+							if e then e:Destroy() end
+						end
+					end
+				end
+			end)
+			if bh_folder then bh_folder:Destroy() bh_folder = nil end
+			bh_anchor = nil
+			bh_att = nil
+			bh_target = nil
+		end
+
+		-- ===== BW 原版: 玩家匹配 =====
+		local function getPlayer(name)
+			local lowerName = string.lower(name)
+			for _, p in pairs(Players:GetPlayers()) do
+				local lowerPlayer = string.lower(p.Name)
+				if string.find(lowerPlayer, lowerName) then
+					return p
+				elseif string.find(string.lower(p.DisplayName), lowerName) then
+					return p
+				end
+			end
+		end
+
+		-- 目标玩家输入框 (留空 = 吸自己, BW 原版默认)
+		local bhInput = trackInstance(Instance.new("Frame"))
+		bhInput.Size = UDim2.new(1, -5, 0, 31)
+		bhInput.BackgroundColor3 = Theme.Element
+		bhInput.BorderSizePixel = 0
+		local bhInputCorner = trackInstance(Instance.new("UICorner"))
+		bhInputCorner.CornerRadius = UDim.new(0, 6); bhInputCorner.Parent = bhInput
+		local bhInputLabel = trackInstance(Instance.new("TextLabel"))
+		bhInputLabel.Size = UDim2.new(0, 108, 1, 0); bhInputLabel.Position = UDim2.fromOffset(10, 0)
+		bhInputLabel.BackgroundTransparency = 1
+		bhInputLabel.Text = "目标玩家:"; bhInputLabel.TextColor3 = Theme.Text
+		bhInputLabel.Font = FontMain; bhInputLabel.TextSize = 13
+		bhInputLabel.TextXAlignment = Enum.TextXAlignment.Left
+		bhInputLabel.Parent = bhInput
+		local bhInputBox = trackInstance(Instance.new("TextBox"))
+		bhInputBox.Size = UDim2.new(1, -120, 0, 22); bhInputBox.Position = UDim2.new(1, -116, 0.5, -11)
+		bhInputBox.BackgroundColor3 = Theme.Background; bhInputBox.TextColor3 = Theme.Accent
+		bhInputBox.Font = FontMain; bhInputBox.TextSize = 13
+		bhInputBox.PlaceholderText = "留空 = 自己"
+		bhInputBox.ClearTextOnFocus = false
+		bhInputBox.TextXAlignment = Enum.TextXAlignment.Center
+		local bhInputBoxCorner = trackInstance(Instance.new("UICorner"))
+		bhInputBoxCorner.CornerRadius = UDim.new(0, 4); bhInputBoxCorner.Parent = bhInputBox
+		bhInputBox.Parent = bhInput
+		bhInput.Parent = page
+		bhInputBox.FocusLost:Connect(function(enterPressed)
+			if enterPressed then
+				local t = bhInputBox.Text and string.gsub(bhInputBox.Text, "^%s*(.-)%s*$", "%1") or ""
+				if t == "" then
+					bhTargetName = ""
+					showToast("黑洞: 目标为自己")
+				else
+					local p = getPlayer(t)
+					if p then
+						bhTargetName = p.Name
+						bhInputBox.Text = p.Name
+						showToast("黑洞: 目标设为 " .. p.Name)
+					else showToast("黑洞: 未找到该玩家") end
+				end
+			end
+		end)
+
+		-- 黑洞开关 (BW 原版 bh_go/bh_stop)
+		makeToggle(page, "黑洞开关", function(v)
+			if v then
+				local tgt = LocalPlayer
+				if bhTargetName ~= "" then
+					tgt = getPlayer(bhTargetName) or LocalPlayer
+				end
+				start_bh(tgt)
+				showToast("黑洞: 开启, 吸向 " .. (tgt == LocalPlayer and "自己" or tgt.Name))
+			else
+				stop_bh()
+				showToast("黑洞: 已关闭")
+			end
+		end, nil, "bwBlackHoleEnabled")
+
+		-- 黑洞吸力滑条 (BW 原版 10-1000, 实时更新所有 BW_BH_AP)
+		makeSlider(page, "黑洞吸力", 10, 1000, 200, "", function(val)
+			bh_resp = math.floor(val)
+			pcall(function()
+				for _, v in pairs(Workspace:GetDescendants()) do
+					if v:IsA("AlignPosition") and v.Name == "BW_BH_AP" then
+						v.Responsiveness = bh_resp
+					end
+				end
+			end)
+		end, "bwBlackHoleResp")
+	end)()
+
+	--============== 环绕根部件 (Super Ring Parts V5) ==============
+	makeSectionLabel(page, "环绕根部件");
+	(function()
+		local rp_radius = 50                -- 环绕半径
+		local rp_height = 100
+		local rp_rotationSpeed = 0.5
+		local rp_attractionStrength = 1000
+		local rp_enabled = false
+
+		local rp_parts = {}                 -- 已登记零件
+		local rp_addConn = nil
+		local rp_removeConn = nil
+		local rp_heartConn = nil
+
+		-- 原版 RetainPart: 登记零件并清零物理属性
+		local function rpRetainPart(part)
+			if part:IsA("BasePart") and not part.Anchored and part:IsDescendantOf(Workspace) then
+				if LocalPlayer.Character and (part.Parent == LocalPlayer.Character or part:IsDescendantOf(LocalPlayer.Character)) then
+					return false
+				end
+				pcall(function() part.CustomPhysicalProperties = PhysicalProperties.new(0, 0, 0, 0, 0) end)
+				part.CanCollide = false
+				return true
+			end
+			return false
+		end
+
+		local function rpAddPart(part)
+			if rpRetainPart(part) then
+				if not table.find(rp_parts, part) then
+					table.insert(rp_parts, part)
+				end
+			end
+		end
+
+		local function rpRemovePart(part)
+			local index = table.find(rp_parts, part)
+			if index then
+				table.remove(rp_parts, index)
+			end
+		end
+
+		-- 开关 (原版 ToggleButton)
+		makeToggle(page, "环绕根部件开关", function(v)
+			rp_enabled = v
+			if v then
+				-- 原版 EnablePartControl: 扩大模拟半径让远端零件速度生效
+				pcall(function() LocalPlayer.ReplicationFocus = Workspace end)
+				for _, part in pairs(Workspace:GetDescendants()) do
+					rpAddPart(part)
+				end
+				rp_addConn = trackConnection(Workspace.DescendantAdded:Connect(rpAddPart))
+				rp_removeConn = trackConnection(Workspace.DescendantRemoving:Connect(rpRemovePart))
+				-- 原版 Heartbeat 环绕主循环
+				rp_heartConn = trackConnection(RunService.Heartbeat:Connect(function()
+					if not rp_enabled then return end
+					pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
+					local humanoidRootPart = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+					if humanoidRootPart then
+						local tornadoCenter = humanoidRootPart.Position
+						for _, part in pairs(rp_parts) do
+							if part.Parent and not part.Anchored then
+								local pos = part.Position
+								local distance = (Vector3.new(pos.X, tornadoCenter.Y, pos.Z) - tornadoCenter).Magnitude
+								local angle = math.atan2(pos.Z - tornadoCenter.Z, pos.X - tornadoCenter.X)
+								local newAngle = angle + math.rad(rp_rotationSpeed)
+								local targetPos = Vector3.new(
+									tornadoCenter.X + math.cos(newAngle) * math.min(rp_radius, distance),
+									tornadoCenter.Y + (rp_height * (math.abs(math.sin((pos.Y - tornadoCenter.Y) / rp_height)))),
+									tornadoCenter.Z + math.sin(newAngle) * math.min(rp_radius, distance)
+								)
+								local directionToTarget = (targetPos - part.Position).unit
+								part.Velocity = directionToTarget * rp_attractionStrength
+							end
+						end
+					end
+				end))
+				showToast("环绕根部件: 已开启")
+			else
+				if rp_addConn then pcall(function() rp_addConn:Disconnect() end) rp_addConn = nil end
+				if rp_removeConn then pcall(function() rp_removeConn:Disconnect() end) rp_removeConn = nil end
+				if rp_heartConn then pcall(function() rp_heartConn:Disconnect() end) rp_heartConn = nil end
+				rp_parts = {}
+				showToast("环绕根部件: 已关闭")
+			end
+		end, nil, "ringPartsEnabled")
+
+		-- 环绕半径滑条 (原版 < > 按钮, 范围 0-10000)
+		makeSlider(page, "环绕半径", 0, 10000, 50, "", function(val)
+			rp_radius = math.floor(val)
+		end, "ringPartsRadius")
+	end)()
 end
 
 --========================================================
